@@ -1,0 +1,19 @@
+services:
+  analysis-worker:
+    build:
+      context: .
+    env_file: .env
+    environment:
+      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v1/ai/providers/ws}
+      VOLLYAI_FIXTURE_ROOT: /reference
+      VOLLYAI_WORKSPACE: /workspaces
+    volumes:
+      - ${VOLLYAI_REFERENCE_ROOT:?Set VOLLYAI_REFERENCE_ROOT to ai-team-handoff}:/reference:ro
+      - analysis-workspaces:/workspaces
+    restart: unless-stopped
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+volumes:
+  analysis-workspaces:
+

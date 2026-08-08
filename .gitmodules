@@ -1,0 +1,4 @@
+[submodule "vendor/volleyball-monitoring-ai"]
+	path = vendor/volleyball-monitoring-ai
+	url = git@github.com:henry753951/volleyball-monitoring-ai.git
+	branch = codex/analysis-engine-integration

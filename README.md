@@ -57,3 +57,12 @@ The worker is outbound-only and exposes no inference HTTP port. Horizontal repli
 use distinct `VOLLYAI_INSTANCE_ID` values; the central server selects the globally
 least-loaded online instance by active jobs divided by declared concurrency.
 
+## Verified integration
+
+The 2026-08-09 local integration run connected two one-slot containers to the central
+WebSocket gateway. A real 398-frame OME canonical clip was assigned to
+`analysis-worker-01`, completed through the signed multipart callback, and persisted as
+12 court-side tracks (6 left / 6 right), two immutable key-point associations, one ball
+path, four overlay chunks and four analysis artifacts. The service/contact anchors
+remained exactly aligned at clip frames 180 and 218 from worker input through central
+ingest. Identity mapping is intentionally a separate downstream operator step.

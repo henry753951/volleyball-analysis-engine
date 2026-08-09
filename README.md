@@ -23,6 +23,16 @@ scaled into the canonical clip frame domain; they never replace a key point's an
 
 ## Local setup
 
+Keep both repositories as siblings. The analysis engine resolves the current central
+SDK directly from `../volleyball-monitoring-ai/sdk`; it does not vendor or clone the
+central repository:
+
+```text
+H:\Repos\
+├── volleyball-analysis-engine\
+└── volleyball-monitoring-ai\
+```
+
 ```powershell
 Copy-Item .env.example .env
 uv sync --extra dev
@@ -44,13 +54,20 @@ single environment cannot accidentally mix backends.
 
 ## Container
 
-The Docker build expects the central SDK submodule at
-`vendor/volleyball-monitoring-ai`. Clone with submodules, configure `.env`, then set the
-host fixture path and start the worker:
+Docker Compose exposes the sibling `../volleyball-monitoring-ai` repository as a named
+read-only build context named `central`. Nothing from the central repository is stored
+inside this Git repository. Configure `.env`, set the host fixture path and start the
+worker:
 
 ```powershell
 $env:VOLLYAI_REFERENCE_ROOT='H:\Repos\volleyball-ai-contract-lab\ai-team-handoff'
 docker compose up --build
+```
+
+For a direct Docker build, provide the same named context explicitly:
+
+```powershell
+docker build --build-context central=../volleyball-monitoring-ai .
 ```
 
 The worker is outbound-only and exposes no inference HTTP port. Horizontal replicas

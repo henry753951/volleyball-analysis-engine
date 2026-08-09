@@ -3,34 +3,36 @@
 from __future__ import annotations
 
 import json
-import shutil
-import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-import cv2
+from volleyball_monitoring_ai import AIJobRequest, AnalysisResult
 
 from .records import ActionObservation, BallObservation, CourtFrame, FrameObservation
+from .visual_v5 import write_visual_v5_package
 
 
 def write_inference_artifacts(
     *,
     output_dir: Path,
     clip_path: Path,
+    job: AIJobRequest,
+    result: AnalysisResult,
     frames: list[FrameObservation],
     balls: dict[int, BallObservation],
     courts: dict[int, CourtFrame],
     actions: dict[tuple[int, int], ActionObservation],
     fps: float,
+    frame_width: int,
+    frame_height: int,
 ) -> dict[str, str]:
-    """Write inspectable JSONL and an H.264/AAC-compatible visualization."""
+    """Write raw observations plus the Contract Lab visual-v5 package."""
     output_dir.mkdir(parents=True, exist_ok=True)
     tracks_path = output_dir / "tracks.jsonl"
     ball_path = output_dir / "ball.jsonl"
     court_path = output_dir / "court.jsonl"
     action_path = output_dir / "actions.jsonl"
-    overlay_path = output_dir / "overlay.mp4"
     _write_jsonl(
         tracks_path,
         (
@@ -93,13 +95,18 @@ def write_inference_artifacts(
             for action in actions.values()
         ),
     )
-    _render_overlay(
+    visual_paths = write_visual_v5_package(
+        output_dir=output_dir,
         clip_path=clip_path,
-        output_path=overlay_path,
-        frames={frame.frame_index: frame for frame in frames},
+        job=job,
+        result=result,
+        frames=frames,
         balls=balls,
-        actions=actions,
+        courts=courts,
         fps=fps,
+        frame_width=frame_width,
+        frame_height=frame_height,
+        action_frame_count=len({action.frame_index for action in actions.values()}),
     )
     manifest_path = output_dir / "inference-manifest.json"
     manifest_path.write_text(
@@ -115,7 +122,11 @@ def write_inference_artifacts(
                     "ball": ball_path.name,
                     "court": court_path.name,
                     "actions": action_path.name,
-                    "video": overlay_path.name,
+                    "video": Path(visual_paths["video"]).name,
+                    "result": Path(visual_paths["result"]).name,
+                    "visual_manifest": Path(visual_paths["manifest"]).name,
+                    "preview_first_complete": Path(visual_paths["preview_first_complete"]).name,
+                    "preview_terminal_path": Path(visual_paths["preview_terminal_path"]).name,
                 },
             },
             ensure_ascii=False,
@@ -128,7 +139,11 @@ def write_inference_artifacts(
         "ball": str(ball_path),
         "court": str(court_path),
         "actions": str(action_path),
-        "video": str(overlay_path),
+        "video": visual_paths["video"],
+        "result": visual_paths["result"],
+        "visual_manifest": visual_paths["manifest"],
+        "preview_first_complete": visual_paths["preview_first_complete"],
+        "preview_terminal_path": visual_paths["preview_terminal_path"],
         "manifest": str(manifest_path),
     }
 
@@ -140,118 +155,3 @@ def _write_jsonl(path: Path, records: Iterable[dict[str, Any]]) -> None:
             stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
             stream.write("\n")
     temporary.replace(path)
-
-
-def _render_overlay(
-    *,
-    clip_path: Path,
-    output_path: Path,
-    frames: dict[int, FrameObservation],
-    balls: dict[int, BallObservation],
-    actions: dict[tuple[int, int], ActionObservation],
-    fps: float,
-) -> None:
-    ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg is None:
-        raise RuntimeError("ffmpeg is required to create overlay.mp4")
-    capture = cv2.VideoCapture(str(clip_path))
-    if not capture.isOpened():
-        raise ValueError(f"cannot open clip for visualization: {clip_path}")
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    command = [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-f",
-        "rawvideo",
-        "-pix_fmt",
-        "bgr24",
-        "-s",
-        f"{width}x{height}",
-        "-r",
-        f"{fps:.6f}",
-        "-i",
-        "pipe:0",
-        "-i",
-        str(clip_path),
-        "-map",
-        "0:v:0",
-        "-map",
-        "1:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        "18",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "aac",
-        "-b:a",
-        "160k",
-        "-shortest",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
-    process = subprocess.Popen(command, stdin=subprocess.PIPE)  # noqa: S603
-    if process.stdin is None:
-        capture.release()
-        process.kill()
-        raise RuntimeError("failed to open ffmpeg input pipe")
-    frame_index = 0
-    try:
-        while True:
-            ok, image = capture.read()
-            if not ok:
-                break
-            frame = frames.get(frame_index)
-            if frame is not None:
-                for player in frame.players:
-                    x1 = round(player.frame_bbox[0] * width)
-                    y1 = round(player.frame_bbox[1] * height)
-                    x2 = round(player.frame_bbox[2] * width)
-                    y2 = round(player.frame_bbox[3] * height)
-                    color = _track_color(player.track_id)
-                    cv2.rectangle(image, (x1, y1), (x2, y2), color, 2, cv2.LINE_AA)
-                    action = actions.get((frame_index, player.source_track_id))
-                    label = f"P{player.track_id}"
-                    if action is not None:
-                        label = f"{label} · {action.label}"
-                    cv2.putText(
-                        image,
-                        label,
-                        (x1, max(22, y1 - 8)),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.62,
-                        color,
-                        2,
-                        cv2.LINE_AA,
-                    )
-            ball = balls.get(frame_index)
-            if ball is not None:
-                center = (
-                    round(ball.frame_pos[0] * width),
-                    round(ball.frame_pos[1] * height),
-                )
-                cv2.circle(image, center, 10, (0, 215, 255), 3, cv2.LINE_AA)
-            process.stdin.write(image.tobytes())
-            frame_index += 1
-    finally:
-        capture.release()
-        process.stdin.close()
-    return_code = process.wait()
-    if return_code != 0:
-        raise RuntimeError(f"ffmpeg overlay render failed with exit code {return_code}")
-
-
-def _track_color(track_id: int) -> tuple[int, int, int]:
-    return (
-        80 + (track_id * 67) % 176,
-        80 + (track_id * 43) % 176,
-        80 + (track_id * 29) % 176,
-    )

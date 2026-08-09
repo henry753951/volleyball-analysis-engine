@@ -77,17 +77,27 @@ Output:
 ```text
 outputs/sample/
 ├── analysis-result.json
+├── analysis-result.mock.json
 ├── overlay.vov1
 ├── offline-run.json
 ├── inference-manifest.json
+├── mock-manifest.json
 ├── tracks.jsonl
 ├── ball.jsonl
 ├── court.jsonl
 ├── actions.jsonl
+├── preview-first-complete.jpg
+├── preview-terminal-path.jpg
+├── mock-overlay.mp4
 └── overlay.mp4
 ```
 
-`overlay.mp4` is rendered through FFmpeg as H.264/yuv420p with AAC audio and `+faststart`.
+The five `*.mock.*` / preview filenames intentionally match the Contract Lab
+`sdk-analysis-visual-v5` package for drop-in visual comparison. Their contents are not mock data:
+they are generated from the current RT-DETRv4/X3D, tracking, court and ReID run.
+`mock-overlay.mp4` (also copied to `overlay.mp4`) uses the same 1920x1080 layout: a 1280x720 match
+view, 640x720 event panel and 1920x360 canonical-court panel. FFmpeg encodes H.264/yuv420p,
+preserves available AAC audio and writes `+faststart` metadata.
 
 For a manually edited marker file, pass either a JSON array of `KeyPointInput` objects or an
 object shaped as `{ "key_points": [...] }`:

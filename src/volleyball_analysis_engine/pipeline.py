@@ -45,7 +45,7 @@ class PipelineConfig:
 class AnalysisPipeline:
     """Produce contract-valid result and overlay artifacts for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-reid-0.2.0"
+    analysis_version = "rtv4-x3d-court-reid-visual-v5-0.3.0"
 
     def __init__(
         self,
@@ -103,19 +103,7 @@ class AnalysisPipeline:
         tracks = self._build_tracks(frames)
         paths = self._build_paths(events)
 
-        if artifact_dir is not None:
-            reporter(0.87, "writing_debug_artifacts")
-            write_inference_artifacts(
-                output_dir=artifact_dir,
-                clip_path=clip_path,
-                frames=frames,
-                balls=balls,
-                courts=inferred.courts,
-                actions=inferred.actions,
-                fps=inferred.fps,
-            )
-
-        reporter(0.90, "building_wire_artifacts")
+        reporter(0.87, "building_wire_artifacts")
         analysis_id = str(uuid4())
         unresolved = sum(
             event["association_state"] in {"ambiguous", "unresolved"} for event in events
@@ -161,6 +149,21 @@ class AnalysisPipeline:
             }
         )
         validate_passthrough(job, result)
+        if artifact_dir is not None:
+            reporter(0.91, "writing_visual_v5_artifacts")
+            write_inference_artifacts(
+                output_dir=artifact_dir,
+                clip_path=clip_path,
+                job=job,
+                result=result,
+                frames=frames,
+                balls=balls,
+                courts=inferred.courts,
+                actions=inferred.actions,
+                fps=inferred.fps,
+                frame_width=inferred.frame_width,
+                frame_height=inferred.frame_height,
+            )
         overlay = build_tracking_overlay(
             job,
             analysis_id=analysis_id,
@@ -245,7 +248,11 @@ class AnalysisPipeline:
         mapped: dict[int, BallObservation] = {}
         for source_frame, ball in source.items():
             frame_index = cls._map_frame(source_frame, source_last_frame, destination_frames)
-            mapped[frame_index] = BallObservation(frame_index=frame_index, frame_pos=ball.frame_pos)
+            mapped[frame_index] = BallObservation(
+                frame_index=frame_index,
+                frame_pos=ball.frame_pos,
+                confidence=ball.confidence,
+            )
         return mapped
 
     @staticmethod

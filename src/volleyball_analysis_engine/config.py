@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     integration_id: str = ""
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.2.0"
+    provider_build_id: str = "volleyball-analysis-engine/0.3.0"
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"

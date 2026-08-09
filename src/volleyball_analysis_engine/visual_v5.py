@@ -21,6 +21,7 @@ VIDEO_WIDTH = 1280
 VIDEO_HEIGHT = 720
 INFO_LEFT = VIDEO_WIDTH
 COURT_TOP = VIDEO_HEIGHT
+PATH_SCROLL_TRANSITION_FRAMES = 12
 
 
 def _frame_point(
@@ -167,6 +168,93 @@ def _path_color(index: int, total: int) -> tuple[int, int, int]:
         round(105 + progress * 105),
         round(185 + progress * 70),
     )
+
+
+def _side_letter(side: str) -> str:
+    return {"left": "L", "right": "R"}.get(side.lower(), "?")
+
+
+def _draw_side_badge(
+    frame: Any,
+    side: str,
+    at: tuple[int, int],
+    *,
+    width: int = 28,
+    height: int = 20,
+) -> None:
+    """Draw a compact court-side badge with a net-like hatch."""
+    x = max(0, min(frame.shape[1] - width, at[0]))
+    y = max(0, min(frame.shape[0] - height, at[1]))
+    accent = {
+        "left": (70, 190, 245),
+        "right": (235, 170, 90),
+    }.get(side.lower(), (145, 155, 165))
+    badge = np.full((height, width, 3), (18, 24, 29), dtype=np.uint8)
+    hatch = tuple(round(channel * 0.58) for channel in accent)
+    for offset in range(-height, width + height, 6):
+        cv2.line(
+            badge,
+            (offset, height - 1),
+            (offset + height, 0),
+            hatch,
+            1,
+            cv2.LINE_AA,
+        )
+    cv2.rectangle(badge, (0, 0), (width - 1, height - 1), accent, 1, cv2.LINE_AA)
+    label = _side_letter(side)
+    (text_width, text_height), _ = cv2.getTextSize(
+        label,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.40,
+        1,
+    )
+    cv2.putText(
+        badge,
+        label,
+        ((width - text_width) // 2, (height + text_height) // 2 - 1),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.40,
+        (248, 250, 252),
+        1,
+        cv2.LINE_AA,
+    )
+    frame[y : y + height, x : x + width] = badge
+
+
+def path_scroll_offset(
+    segments: list[dict[str, Any]],
+    frame_index: int,
+    *,
+    visible_rows: int = 7,
+    transition_frames: int = PATH_SCROLL_TRANSITION_FRAMES,
+) -> float:
+    """Return a smooth row offset that keeps the latest completed path visible."""
+    if len(segments) <= visible_rows:
+        return 0.0
+    completed = sum(int(segment.get("end_frame_index", 0)) <= frame_index for segment in segments)
+    target = min(max(0, completed - visible_rows), len(segments) - visible_rows)
+    if target <= 0:
+        return 0.0
+    trigger_index = target + visible_rows - 1
+    trigger_frame = int(segments[trigger_index].get("end_frame_index", frame_index))
+    progress = max(0.0, min(1.0, (frame_index - trigger_frame) / max(transition_frames, 1)))
+    eased = progress * progress * (3.0 - 2.0 * progress)
+    return (target - 1) + eased
+
+
+def _path_position_side(
+    position: dict[str, Any] | None,
+    track_sides: dict[int, str],
+) -> str:
+    if position is None:
+        return "unknown"
+    track_id = position.get("track_id")
+    if track_id is not None:
+        return track_sides.get(int(track_id), "unknown")
+    court_pos = position.get("court_pos")
+    if court_pos is None:
+        return "unknown"
+    return "left" if float(court_pos["x"]) < 0.5 else "right"
 
 
 def _draw_court_keypoints(
@@ -337,6 +425,7 @@ def _draw_tracking(
             "ball_control": "CONTROL",
         }.get(label, label.upper())
         color = _action_color(label)
+        label_y = max(21, top_left[1] - 5)
         if label != "ready_position":
             cv2.rectangle(
                 frame,
@@ -346,10 +435,17 @@ def _draw_tracking(
                 4 if highlight else 2,
                 cv2.LINE_AA,
             )
+        _draw_side_badge(
+            frame,
+            player.court_side,
+            (top_left[0] + 2, label_y - 18),
+            width=26,
+            height=18,
+        )
         _boxed_text(
             frame,
             f"T{player.track_id} | {display_label}",
-            (top_left[0] + 2, max(17, top_left[1] - 5)),
+            (top_left[0] + 32, label_y),
             foreground=(15, 20, 24) if highlight else (245, 248, 250),
             background=(
                 (0, 255, 255)
@@ -732,7 +828,7 @@ def _draw_court_panel(
     panel_left = 690
     _text(
         frame,
-        "A / B PATH RESOLUTION",
+        "A / B PATH RESOLUTION  |  COURT SIDE",
         (panel_left, COURT_TOP + 30),
         0.52,
         (185, 220, 245),
@@ -744,27 +840,51 @@ def _draw_court_panel(
         0.42,
         (145, 160, 175),
     )
-    for index, segment in enumerate(result.get("path_segments", [])[:7]):
+    segments = cast("list[dict[str, Any]]", result.get("path_segments", []))
+    track_sides = {
+        int(track["track_id"]): str(track.get("court_side", "unknown"))
+        for track in result.get("tracks", [])
+    }
+    row_spacing = 32
+    visible_rows = 7
+    scroll_offset = path_scroll_offset(
+        segments,
+        frame_index,
+        visible_rows=visible_rows,
+    )
+    for index, segment in enumerate(segments):
+        row_position = index - scroll_offset
+        if not -0.75 <= row_position <= visible_rows - 0.15:
+            continue
+        row_y = COURT_TOP + 96 + round(row_position * row_spacing)
         start = segment.get("start_court_positions", [])
         end = segment.get("end_court_positions", [])
+        start_position = start[0] if start else None
+        end_position = end[0] if end else None
         start_id = start[0].get("track_id") if start else None
         end_id = end[0].get("track_id") if end else None
-        end_label = (
-            f"track {end_id}" if end_id is not None else ("landing" if end else "unavailable")
-        )
+        start_label = f"T{start_id}" if start_id is not None else "n/a"
+        end_label = f"T{end_id}" if end_id is not None else ("LAND" if end else "n/a")
+        start_side = _path_position_side(start_position, track_sides)
+        end_side = _path_position_side(end_position, track_sides)
         state = "DONE" if int(segment.get("end_frame_index", 0)) <= frame_index else "WAIT"
         color = (90, 230, 145) if state == "DONE" else (115, 125, 135)
         _text(
             frame,
-            f"#{index}  A track {start_id if start_id is not None else 'n/a'}  ->  B {end_label}",
-            (panel_left, COURT_TOP + 96 + index * 32),
+            f"#{index + 1:02d}",
+            (panel_left, row_y),
             0.44,
             color,
         )
+        _draw_side_badge(frame, start_side, (panel_left + 50, row_y - 16))
+        _text(frame, f"A {start_label}", (panel_left + 86, row_y), 0.44, color)
+        _text(frame, "->", (panel_left + 176, row_y), 0.44, (155, 170, 182))
+        _draw_side_badge(frame, end_side, (panel_left + 218, row_y - 16))
+        _text(frame, f"B {end_label}", (panel_left + 254, row_y), 0.44, color)
         _text(
             frame,
             state,
-            (OUTPUT_WIDTH - 84, COURT_TOP + 96 + index * 32),
+            (OUTPUT_WIDTH - 84, row_y),
             0.39,
             color,
         )
@@ -812,15 +932,17 @@ def preview_frame_indices(
     events = result.get("contact_events", [])
     first_complete = int(paths[0]["end_frame_index"]) if paths else 0
     terminal = next((event for event in reversed(events) if event.get("is_terminal")), None)
-    terminal_frame = int(
-        terminal.get("resolved_frame_index", terminal["anchor_frame_index"])
-        if terminal is not None
-        else first_complete
-    )
+    terminal_frame = int(terminal["anchor_frame_index"] if terminal is not None else first_complete)
     upper = max(total_frames - 1, 0)
     return (
         min(upper, max(0, first_complete + round(fps * 0.15))),
-        min(upper, max(0, terminal_frame + max(1, round(fps / 30.0)))),
+        min(
+            upper,
+            max(
+                0,
+                terminal_frame + max(PATH_SCROLL_TRANSITION_FRAMES, round(fps / 30.0)),
+            ),
+        ),
     )
 
 

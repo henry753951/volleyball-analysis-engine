@@ -1,12 +1,14 @@
-"""Ball-to-hitter association and temporary A/B action rules."""
+"""Action-aware ball-to-hitter association and temporary A/B action rules."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .records import BallObservation, PlayerObservation
+from .records import ActionObservation, BallObservation, PlayerObservation
 
 COURT_MIDLINE_X = 0.5
+CONTACT_ACTION_PRIORITY = {"spiking": 0, "passing": 1, "setting": 1, "digging": 2}
+BALL_ACTION_FRAME_TOLERANCE = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,47 +67,174 @@ def _best_player(
     return (best, best_score) if best_score > 0 else (None, 0.0)
 
 
-def associate_hit(
+def _nearby_frames(
+    anchor_frame: int,
+    *,
+    lower_frame: int,
+    upper_frame: int,
+    radius: int,
+) -> list[int]:
+    start = max(lower_frame, anchor_frame - radius)
+    end = min(upper_frame, anchor_frame + radius)
+    return sorted(range(start, end + 1), key=lambda frame: (abs(frame - anchor_frame), frame))
+
+
+def _nearest_ball(
+    balls: dict[int, BallObservation],
+    frame_index: int,
+    *,
+    lower_frame: int,
+    upper_frame: int,
+    max_distance: int | None = None,
+) -> BallObservation | None:
+    candidates = [
+        ball
+        for candidate_frame, ball in balls.items()
+        if lower_frame <= candidate_frame <= upper_frame
+        and (max_distance is None or abs(candidate_frame - frame_index) <= max_distance)
+    ]
+    return min(candidates, key=lambda ball: abs(ball.frame_index - frame_index), default=None)
+
+
+def _action_candidate(
     *,
     anchor_frame: int,
-    next_anchor_frame: int,
-    is_terminal: bool,
+    lower_frame: int,
+    upper_frame: int,
+    search_radius: int,
     balls: dict[int, BallObservation],
     players: dict[int, tuple[PlayerObservation, ...]],
+    actions: dict[tuple[int, int], ActionObservation],
     frame_width: int,
     frame_height: int,
-) -> HitAssociation:
-    """Associate a marker with ball evidence and the nearest plausible player."""
-    if not balls:
-        return HitAssociation(None, None, None, "ball_missing", None)
-    ball_frame = min(balls, key=lambda frame: abs(frame - anchor_frame))
-    ball = balls[ball_frame]
-    player, score = _best_player(
-        ball,
-        players.get(ball_frame, ()),
-        frame_width=frame_width,
-        frame_height=frame_height,
-    )
-    if player is not None:
-        return HitAssociation(ball, player, ball_frame, "direct_hit_ball_iou", score)
-    if not is_terminal:
-        for frame_index in range(ball_frame + 1, next_anchor_frame):
+) -> HitAssociation | None:
+    """Prefer the closest spike/set/dig evidence before spatial-only fallback."""
+    for frame_index in _nearby_frames(
+        anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+        radius=search_radius,
+    ):
+        action_players: list[tuple[PlayerObservation, ActionObservation]] = []
+        for player in players.get(frame_index, ()):
+            action = actions.get((frame_index, player.source_track_id))
+            if action is not None and action.label.lower() in CONTACT_ACTION_PRIORITY:
+                action_players.append((player, action))
+        if not action_players:
+            continue
+
+        ball = _nearest_ball(
+            balls,
+            frame_index,
+            lower_frame=lower_frame,
+            upper_frame=upper_frame,
+            max_distance=BALL_ACTION_FRAME_TOLERANCE,
+        )
+        if ball is not None:
             player, score = _best_player(
                 ball,
-                players.get(frame_index, ()),
+                tuple(candidate[0] for candidate in action_players),
                 frame_width=frame_width,
                 frame_height=frame_height,
             )
             if player is not None:
+                action = next(
+                    candidate_action
+                    for candidate_player, candidate_action in action_players
+                    if candidate_player.source_track_id == player.source_track_id
+                )
                 return HitAssociation(
                     ball,
                     player,
                     frame_index,
-                    "forward_player_frames_at_fixed_hit_ball",
+                    f"action_{action.label.lower()}_ball_iou",
                     score,
                 )
+
+        player, action = min(
+            action_players,
+            key=lambda candidate: (
+                CONTACT_ACTION_PRIORITY[candidate[1].label.lower()],
+                -(candidate[1].confidence or 0.0),
+                candidate[0].source_track_id,
+            ),
+        )
+        event_ball = ball or _nearest_ball(
+            balls,
+            anchor_frame,
+            lower_frame=lower_frame,
+            upper_frame=upper_frame,
+        )
+        return HitAssociation(
+            event_ball,
+            player,
+            frame_index,
+            f"action_{action.label.lower()}_near_anchor",
+            action.confidence,
+        )
+    return None
+
+
+def associate_hit(
+    *,
+    anchor_frame: int,
+    previous_anchor_frame: int,
+    next_anchor_frame: int,
+    is_terminal: bool,
+    balls: dict[int, BallObservation],
+    players: dict[int, tuple[PlayerObservation, ...]],
+    actions: dict[tuple[int, int], ActionObservation],
+    frame_width: int,
+    frame_height: int,
+    action_search_radius: int,
+) -> HitAssociation:
+    """Resolve the nearest contact action, then fall back to spatial ball IoU."""
+    lower_frame = max(0, previous_anchor_frame + 1)
+    upper_frame = max(lower_frame, next_anchor_frame - 1)
+    action_match = _action_candidate(
+        anchor_frame=anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+        search_radius=action_search_radius,
+        balls=balls,
+        players=players,
+        actions=actions,
+        frame_width=frame_width,
+        frame_height=frame_height,
+    )
+    if action_match is not None:
+        return action_match
+    if not balls:
+        return HitAssociation(None, None, None, "ball_missing", None)
+    ball = _nearest_ball(
+        balls,
+        anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+    )
+    if ball is None:
+        return HitAssociation(None, None, None, "ball_missing_in_event_window", None)
+    for frame_index in _nearby_frames(
+        anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+        radius=action_search_radius,
+    ):
+        player, score = _best_player(
+            ball,
+            players.get(frame_index, ()),
+            frame_width=frame_width,
+            frame_height=frame_height,
+        )
+        if player is not None:
+            mode = (
+                "direct_hit_ball_iou"
+                if frame_index == ball.frame_index
+                else ("nearby_player_frames_at_fixed_hit_ball")
+            )
+            return HitAssociation(ball, player, frame_index, mode, score)
     mode = "terminal_ground_candidate" if is_terminal else "no_player"
-    return HitAssociation(ball, None, ball_frame, mode, None)
+    return HitAssociation(ball, None, ball.frame_index, mode, None)
 
 
 def classify_action(

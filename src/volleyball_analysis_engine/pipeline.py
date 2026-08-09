@@ -40,12 +40,13 @@ class PipelineConfig:
 
     court_confidence_threshold: float = 0.25
     reid_max_distance: float = 0.35
+    association_search_seconds: float = 0.25
 
 
 class AnalysisPipeline:
     """Produce contract-valid result and overlay artifacts for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-reid-visual-v5-0.3.0"
+    analysis_version = "rtv4-x3d-court-reid-visual-v5-0.3.1"
 
     def __init__(
         self,
@@ -82,6 +83,7 @@ class AnalysisPipeline:
             frame_height=inferred.frame_height,
         )
         balls = self._map_balls(inferred.balls, source_last_frame, destination_frames)
+        actions = self._map_actions(inferred.actions, source_last_frame, destination_frames)
 
         reporter(0.76, "court_reidentification")
         frames = CourtPositionReidentifier(
@@ -96,7 +98,7 @@ class AnalysisPipeline:
             balls,
             players_by_frame,
             homographies,
-            actions=inferred.actions,
+            actions=actions,
             frame_width=inferred.frame_width,
             frame_height=inferred.frame_height,
         )
@@ -159,7 +161,7 @@ class AnalysisPipeline:
                 frames=frames,
                 balls=balls,
                 courts=inferred.courts,
-                actions=inferred.actions,
+                actions=actions,
                 fps=inferred.fps,
                 frame_width=inferred.frame_width,
                 frame_height=inferred.frame_height,
@@ -255,6 +257,29 @@ class AnalysisPipeline:
             )
         return mapped
 
+    @classmethod
+    def _map_actions(
+        cls,
+        source: dict[tuple[int, int], ActionObservation],
+        source_last_frame: int,
+        destination_frames: int,
+    ) -> dict[tuple[int, int], ActionObservation]:
+        """Map provider frames into the canonical clip frame domain."""
+        mapped: dict[tuple[int, int], ActionObservation] = {}
+        for (source_frame, track_id), action in source.items():
+            frame_index = cls._map_frame(source_frame, source_last_frame, destination_frames)
+            candidate = ActionObservation(
+                frame_index=frame_index,
+                track_id=track_id,
+                label=action.label,
+                confidence=action.confidence,
+            )
+            key = (frame_index, track_id)
+            previous = mapped.get(key)
+            if previous is None or (candidate.confidence or 0.0) > (previous.confidence or 0.0):
+                mapped[key] = candidate
+        return mapped
+
     @staticmethod
     def _map_frame(frame: int, source_last_frame: int, destination_frames: int) -> int:
         if source_last_frame <= 0 or destination_frames <= 1:
@@ -277,8 +302,11 @@ class AnalysisPipeline:
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         total_frames = int(job.clip.video.total_frames)
+        fps = int(job.clip.video.fps.num) / int(job.clip.video.fps.den)
+        action_search_radius = max(3, round(fps * self.config.association_search_seconds))
         for index, point in enumerate(job.key_points):
             anchor = int(point.clip_frame_index)
+            previous_anchor = int(job.key_points[index - 1].clip_frame_index) if index > 0 else -1
             next_anchor = (
                 int(job.key_points[index + 1].clip_frame_index)
                 if index + 1 < len(job.key_points)
@@ -286,12 +314,15 @@ class AnalysisPipeline:
             )
             association = associate_hit(
                 anchor_frame=anchor,
+                previous_anchor_frame=previous_anchor,
                 next_anchor_frame=next_anchor,
                 is_terminal=point.is_terminal,
                 balls=balls,
                 players=players,
+                actions=actions,
                 frame_width=frame_width,
                 frame_height=frame_height,
+                action_search_radius=action_search_radius,
             )
             actor = self._actor(
                 association.player, association.observation_frame, association.confidence
@@ -310,6 +341,7 @@ class AnalysisPipeline:
                     actions,
                     frame_index=association.observation_frame,
                     track_id=association.player.source_track_id,
+                    radius=action_search_radius,
                 )
                 if action is not None:
                     actor["action"] = {
@@ -498,7 +530,7 @@ class AnalysisPipeline:
                         "complete" if start_positions and end_positions else "unavailable"
                     ),
                     "is_terminal_segment": bool(end["is_terminal"]),
-                    "quality_flags": ["fixture_ball_data", "canonical_anchor_frames"],
+                    "quality_flags": ["canonical_anchor_frames"],
                 }
             )
         return paths

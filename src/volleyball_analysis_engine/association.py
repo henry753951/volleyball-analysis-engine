@@ -111,15 +111,11 @@ def associate_hit(
 def classify_action(
     start_position: tuple[float, float] | None,
     end_position: tuple[float, float] | None,
-    *,
-    is_service: bool,
 ) -> tuple[str, bool] | None:
     """Temporary action label derived only from adjacent A/B court positions."""
     if start_position is None or end_position is None:
         return None
     crosses_court = (start_position[0] < COURT_MIDLINE_X) != (end_position[0] < COURT_MIDLINE_X)
-    if crosses_court and is_service:
-        return "serving", True
     if crosses_court:
-        return "spiking", True
-    return "passing", False
+        return "Spiking", True
+    return "Waiting", False

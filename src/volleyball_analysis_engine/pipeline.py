@@ -432,7 +432,6 @@ class AnalysisPipeline:
             classification = classify_action(
                 start,
                 end,
-                is_service=event["marker_kind"] == "service",
             )
             if classification is None:
                 continue

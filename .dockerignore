@@ -4,13 +4,3 @@
 .ruff_cache
 **/__pycache__
 workspaces
-vendor/volleyball-monitoring-ai/*
-!vendor/volleyball-monitoring-ai/sdk
-!vendor/volleyball-monitoring-ai/sdk/**
-!vendor/volleyball-monitoring-ai/packages
-!vendor/volleyball-monitoring-ai/packages/contracts
-!vendor/volleyball-monitoring-ai/packages/contracts/flatbuffers
-!vendor/volleyball-monitoring-ai/packages/contracts/flatbuffers/overlay.fbs
-!vendor/volleyball-monitoring-ai/packages/contracts/fixtures
-!vendor/volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally
-!vendor/volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/result.json

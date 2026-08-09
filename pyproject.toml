@@ -44,7 +44,7 @@ conflicts = [
 ]
 
 [tool.uv.sources]
-volleyball-monitoring-ai-sdk = { path = "vendor/volleyball-monitoring-ai/sdk" }
+volleyball-monitoring-ai-sdk = { path = "../volleyball-monitoring-ai/sdk" }
 torch = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu130", extra = "cu130" },
@@ -67,7 +67,6 @@ explicit = true
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["vendor"]
 
 [tool.ruff.lint]
 select = ["ALL"]

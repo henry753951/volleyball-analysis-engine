@@ -2,6 +2,8 @@ services:
   analysis-worker:
     build:
       context: .
+      additional_contexts:
+        central: ../volleyball-monitoring-ai
     env_file: .env
     environment:
       VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v1/ai/providers/ws}
@@ -16,4 +18,3 @@ services:
 
 volumes:
   analysis-workspaces:
-

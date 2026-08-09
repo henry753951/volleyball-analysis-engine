@@ -1124,14 +1124,14 @@ requires-dist = [
     { name = "torch", marker = "extra == 'cu130'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "volleyball-analysis-engine", extra = "cu130" } },
     { name = "torchvision", marker = "extra == 'cpu'", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cpu", conflict = { package = "volleyball-analysis-engine", extra = "cpu" } },
     { name = "torchvision", marker = "extra == 'cu130'", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "volleyball-analysis-engine", extra = "cu130" } },
-    { name = "volleyball-monitoring-ai-sdk", directory = "vendor/volleyball-monitoring-ai/sdk" },
+    { name = "volleyball-monitoring-ai-sdk", directory = "../volleyball-monitoring-ai/sdk" },
 ]
 provides-extras = ["cpu", "cu130", "dev"]
 
 [[package]]
 name = "volleyball-monitoring-ai-sdk"
 version = "0.2.0"
-source = { directory = "vendor/volleyball-monitoring-ai/sdk" }
+source = { directory = "../volleyball-monitoring-ai/sdk" }
 dependencies = [
     { name = "flatbuffers" },
     { name = "httpx" },

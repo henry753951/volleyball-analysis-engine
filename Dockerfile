@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 FROM ghcr.io/astral-sh/uv:0.11.31 AS uv
-FROM python:3.12-slim-bookworm AS runtime
+FROM python:3.12-slim-bookworm AS base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -14,13 +14,22 @@ RUN apt-get update \
 
 COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
+
+FROM base AS build
 COPY pyproject.toml uv.lock README.md ./
-COPY vendor/volleyball-monitoring-ai/sdk ./vendor/volleyball-monitoring-ai/sdk
-COPY vendor/volleyball-monitoring-ai/packages/contracts/flatbuffers/overlay.fbs ./vendor/volleyball-monitoring-ai/packages/contracts/flatbuffers/overlay.fbs
-COPY vendor/volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/result.json ./vendor/volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/result.json
+# `central` is a named build context pointing at the sibling
+# ../volleyball-monitoring-ai repository. The SDK's Hatch build includes these
+# two contract assets, so preserve the central repository's relative layout.
+COPY --from=central sdk /volleyball-monitoring-ai/sdk
+COPY --from=central packages/contracts/flatbuffers/overlay.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/overlay.fbs
+COPY --from=central packages/contracts/fixtures/normal-rally/result.json /volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/result.json
 RUN uv sync --frozen --no-dev --extra cpu --no-install-project
 COPY src ./src
 RUN uv sync --frozen --no-dev --extra cpu
+
+FROM base AS runtime
+WORKDIR /app
+COPY --from=build /app /app
 
 RUN useradd --create-home --uid 10001 worker \
     && mkdir -p /workspaces \

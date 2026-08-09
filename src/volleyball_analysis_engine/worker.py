@@ -44,7 +44,7 @@ async def run_worker(settings: Settings) -> None:
     pipeline = build_pipeline(settings)
     worker_config = (
         WorkerConfig(
-            server_ws_url=settings.provider_url(),
+            server_ws_url=settings.server_ws_url,
             token=settings.token,
             workspace=settings.workspace,
             provider_build_id=settings.provider_build_id,
@@ -54,7 +54,7 @@ async def run_worker(settings: Settings) -> None:
         )
         if settings.instance_id is not None
         else WorkerConfig(
-            server_ws_url=settings.provider_url(),
+            server_ws_url=settings.server_ws_url,
             token=settings.token,
             workspace=settings.workspace,
             provider_build_id=settings.provider_build_id,

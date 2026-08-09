@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlencode, urlparse, urlunparse
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -20,7 +19,6 @@ class Settings(BaseSettings):
     )
 
     server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
-    integration_id: str = ""
     token: str = ""
     workspace: Path = Path("workspaces")
     provider_build_id: str = "volleyball-analysis-engine/0.3.0"
@@ -45,16 +43,9 @@ class Settings(BaseSettings):
         "selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60"
     )
 
-    def provider_url(self) -> str:
-        """Return the central provider URL with its required integration identifier."""
-        if not self.integration_id:
-            raise ValueError("VOLLYAI_INTEGRATION_ID is required in online worker mode")
-        parsed = urlparse(self.server_ws_url)
-        query = urlencode({"integration_id": self.integration_id})
-        return urlunparse(parsed._replace(query=query))
-
     def validate_online(self) -> None:
         """Validate credentials only for the networked worker mode."""
         if len(self.token) < 16:
             raise ValueError("VOLLYAI_TOKEN must contain at least 16 characters")
-        self.provider_url()
+        if not self.server_ws_url.startswith(("ws://", "wss://")):
+            raise ValueError("VOLLYAI_SERVER_WS_URL must use ws:// or wss://")

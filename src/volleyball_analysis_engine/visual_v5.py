@@ -1168,11 +1168,11 @@ def write_visual_v5_package(
     output_dir.mkdir(parents=True, exist_ok=True)
     job_document = job.model_dump(mode="json", exclude_none=True)
     result_document = result.model_dump(mode="json", exclude_none=True)
-    result_path = output_dir / "analysis-result.mock.json"
-    video_path = output_dir / "mock-overlay.mp4"
+    result_path = output_dir / "analysis-result.json"
+    video_path = output_dir / "overlay-preview.mp4"
     first_preview = output_dir / "preview-first-complete.jpg"
     terminal_preview = output_dir / "preview-terminal-path.jpg"
-    manifest_path = output_dir / "mock-manifest.json"
+    manifest_path = output_dir / "visualization-manifest.json"
     result_path.write_text(
         json.dumps(result_document, ensure_ascii=False, indent=2),
         encoding="utf-8",
@@ -1221,7 +1221,6 @@ def write_visual_v5_package(
         json.dumps(manifest, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-    shutil.copy2(video_path, output_dir / "overlay.mp4")
     return {
         "result": str(result_path),
         "video": str(video_path),

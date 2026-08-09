@@ -12,6 +12,7 @@ from volleyball_monitoring_ai import (
 )
 
 from .config import Settings
+from .inference import ModelPaths, Rtv4X3DObservationProvider
 from .pipeline import AnalysisPipeline, PipelineConfig
 
 
@@ -28,7 +29,7 @@ def capabilities(settings: Settings) -> ProviderCapabilities:
             "optional_extensions": {"action": True, "group_phase": False, "confidence": True},
             "action_taxonomies": [
                 {
-                    "taxonomy_id": "volleyball-analysis-engine.ball-path-heuristic",
+                    "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",
                     "taxonomy_version": "1",
                 }
             ],
@@ -39,12 +40,8 @@ def capabilities(settings: Settings) -> ProviderCapabilities:
 
 async def run_worker(settings: Settings) -> None:
     """Connect forever, accepting only central-server leased work."""
-    pipeline = AnalysisPipeline(
-        PipelineConfig(
-            fixture_root=settings.fixture_root,
-            tracking_variant=settings.tracking_variant,
-        )
-    )
+    settings.validate_online()
+    pipeline = build_pipeline(settings)
     worker_config = (
         WorkerConfig(
             server_ws_url=settings.provider_url(),
@@ -68,7 +65,7 @@ async def run_worker(settings: Settings) -> None:
     client = AIWorkerClient(worker_config)
 
     async def handle(context: JobContext) -> None:
-        await context.download_clip()
+        clip_path = await context.download_clip()
         loop = asyncio.get_running_loop()
 
         def report(progress: float, stage: str) -> None:
@@ -78,8 +75,34 @@ async def run_worker(settings: Settings) -> None:
             )
             future.result(timeout=15)
 
-        bundle = await asyncio.to_thread(pipeline.analyze, context.job, report)
+        bundle = await asyncio.to_thread(
+            pipeline.analyze,
+            context.job,
+            clip_path,
+            report,
+            context.workspace / "artifacts",
+        )
         await context.complete(bundle)
         await context.report_progress(1.0, "completed")
 
     await client.run_forever(handle)
+
+
+def build_pipeline(settings: Settings) -> AnalysisPipeline:
+    """Build the single model pipeline shared by online and offline entrypoints."""
+    provider = Rtv4X3DObservationProvider(
+        ModelPaths(
+            rtv4_root=settings.rtv4_root,
+            rtv4_config=settings.rtv4_config,
+            rtv4_checkpoint=settings.rtv4_checkpoint,
+            court_checkpoint=settings.court_checkpoint,
+            smp_root=settings.smp_root,
+            osnet_checkpoint=settings.osnet_checkpoint,
+        ),
+        device=settings.device,
+        backend=settings.rtv4_backend,
+        detector_threshold=settings.detector_threshold,
+        court_stride=settings.court_stride,
+        disable_amp=settings.disable_amp,
+    )
+    return AnalysisPipeline(provider, PipelineConfig())

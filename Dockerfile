@@ -9,7 +9,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH="/app/.venv/bin:$PATH"
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends libglib2.0-0 libgl1 \
+    && apt-get install --yes --no-install-recommends ffmpeg libglib2.0-0 libgl1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=uv /uv /uvx /bin/
@@ -23,9 +23,9 @@ COPY pyproject.toml uv.lock README.md ./
 COPY --from=central sdk /volleyball-monitoring-ai/sdk
 COPY --from=central packages/contracts/flatbuffers/overlay.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/overlay.fbs
 COPY --from=central packages/contracts/fixtures/normal-rally/result.json /volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/result.json
-RUN uv sync --frozen --no-dev --extra cpu --no-install-project
+RUN uv sync --frozen --no-dev --extra cpu --extra models --no-install-project
 COPY src ./src
-RUN uv sync --frozen --no-dev --extra cpu
+RUN uv sync --frozen --no-dev --extra cpu --extra models
 
 FROM base AS runtime
 WORKDIR /app

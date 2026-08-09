@@ -1,4 +1,4 @@
-"""Reference-backed analysis pipeline with canonical frame alignment."""
+"""Model-backed analysis pipeline with canonical frame alignment."""
 
 from __future__ import annotations
 
@@ -20,10 +20,11 @@ from volleyball_monitoring_ai import (
     validate_passthrough,
 )
 
-from .association import associate_hit, classify_action
+from .artifacts import write_inference_artifacts
+from .association import associate_hit
 from .geometry import estimate_homography, project_normalized_frame_point
-from .records import BallObservation, FrameObservation, PlayerObservation
-from .reference_data import load_ball_positions, load_court_frames, load_player_frames
+from .inference import ObservationProvider
+from .records import ActionObservation, BallObservation, FrameObservation, PlayerObservation
 from .reid import CourtPositionReidentifier
 
 ProgressReporter = Callable[[float, str], None]
@@ -35,101 +36,86 @@ def _noop_progress(_progress: float, _stage: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
-    """Paths and thresholds for the replaceable reference backend."""
+    """Geometry and identity thresholds independent of a specific model backend."""
 
-    fixture_root: Path
-    tracking_variant: str = "sam-deep-eiou"
     court_confidence_threshold: float = 0.25
     reid_max_distance: float = 0.35
-    fixture_frame_width: int = 640
-    fixture_frame_height: int = 360
-
-    @property
-    def tracking_path(self) -> Path:
-        """Return the selected recorded player-tracking fixture."""
-        variants = {
-            "deep-eiou": "tracks-deep-eiou.jsonl",
-            "sam-deep-eiou": "tracks-sam-deep-eiou.jsonl",
-        }
-        try:
-            file_name = variants[self.tracking_variant]
-        except KeyError as exc:
-            msg = f"unknown tracking variant: {self.tracking_variant}"
-            raise ValueError(msg) from exc
-        return self.fixture_root / "tracking-data" / file_name
-
-    @property
-    def court_path(self) -> Path:
-        """Return the recorded court-keypoint fixture."""
-        return self.fixture_root / "tracking-data" / "court-keypoints.jsonl"
-
-    @property
-    def ball_path(self) -> Path:
-        """Return the temporary manual ball fixture."""
-        return self.fixture_root / "input" / "ball-annotations.manual.json"
 
 
 class AnalysisPipeline:
     """Produce contract-valid result and overlay artifacts for an incoming job."""
 
-    analysis_version = "reference-geometry-reid-0.1.0"
+    analysis_version = "rtv4-x3d-court-reid-0.2.0"
 
-    def __init__(self, config: PipelineConfig) -> None:
-        """Configure one reusable reference-backed analysis pipeline."""
-        self.config = config
+    def __init__(
+        self,
+        provider: ObservationProvider,
+        config: PipelineConfig | None = None,
+    ) -> None:
+        """Configure one reusable model-backed analysis pipeline."""
+        self.provider = provider
+        self.config = config or PipelineConfig()
 
     def analyze(
         self,
         job: AIJobRequest,
+        clip_path: Path,
         report: ProgressReporter | None = None,
+        artifact_dir: Path | None = None,
     ) -> AnalysisBundle:
         """Analyze one canonical clip while preserving every immutable anchor."""
         reporter: ProgressReporter = report or _noop_progress
-        reporter(0.10, "loading_reference_data")
-        source_players = load_player_frames(self.config.tracking_path)
-        source_courts = load_court_frames(self.config.court_path)
-        source_balls = load_ball_positions(self.config.ball_path)
-        source_last_frame = max(
-            max(source_players, default=0),
-            max(source_courts, default=0),
-            max(source_balls, default=0),
-        )
+        inferred = self.provider.infer(clip_path, job, reporter)
+        source_last_frame = inferred.frame_count - 1
         destination_frames = int(job.clip.video.total_frames)
         if destination_frames < 1:
             msg = "canonical clip must contain at least one frame"
             raise ValueError(msg)
 
-        reporter(0.22, "court_projection")
+        reporter(0.72, "court_projection")
         frames, homographies = self._project_frames(
-            source_players,
-            source_courts,
+            inferred.players,
+            inferred.courts,
             source_last_frame=source_last_frame,
             destination_frames=destination_frames,
-            frame_width=self.config.fixture_frame_width,
-            frame_height=self.config.fixture_frame_height,
+            frame_width=inferred.frame_width,
+            frame_height=inferred.frame_height,
         )
-        balls = self._map_balls(source_balls, source_last_frame, destination_frames)
+        balls = self._map_balls(inferred.balls, source_last_frame, destination_frames)
 
-        reporter(0.38, "player_tracking")
-        reporter(0.48, "reidentification")
+        reporter(0.76, "court_reidentification")
         frames = CourtPositionReidentifier(
             max_per_side=6,
             max_distance=self.config.reid_max_distance,
         ).apply(frames)
         players_by_frame = {frame.frame_index: frame.players for frame in frames}
 
-        reporter(0.62, "hit_association")
+        reporter(0.82, "hit_association")
         events = self._build_events(
             job,
             balls,
             players_by_frame,
             homographies,
+            actions=inferred.actions,
+            frame_width=inferred.frame_width,
+            frame_height=inferred.frame_height,
         )
-        self._apply_actions(events)
         tracks = self._build_tracks(frames)
         paths = self._build_paths(events)
 
-        reporter(0.82, "building_artifacts")
+        if artifact_dir is not None:
+            reporter(0.87, "writing_debug_artifacts")
+            write_inference_artifacts(
+                output_dir=artifact_dir,
+                clip_path=clip_path,
+                frames=frames,
+                balls=balls,
+                courts=inferred.courts,
+                actions=inferred.actions,
+                fps=inferred.fps,
+            )
+
+        reporter(0.90, "building_wire_artifacts")
         analysis_id = str(uuid4())
         unresolved = sum(
             event["association_state"] in {"ambiguous", "unresolved"} for event in events
@@ -149,7 +135,7 @@ class AnalysisPipeline:
                 "producer": {
                     "name": "volleyball-analysis-engine",
                     "build_id": self.analysis_version,
-                    "sdk_version": "0.2.0",
+                    "sdk_version": "0.3.0",
                 },
                 "tracks": tracks,
                 "contact_events": events,
@@ -160,18 +146,16 @@ class AnalysisPipeline:
                     "path_segment_count": len(paths),
                     "unresolved_event_count": unresolved,
                     "multiple_event_count": 0,
-                    "warnings": [
-                        "ball positions are read from the temporary fixed JSON fixture",
-                        "actions use the temporary adjacent A/B court-position heuristic",
-                    ],
+                    "warnings": [],
                 },
                 "extensions": {
-                    "reference_backend": "volleyball-ai-contract-lab/ai-team-handoff",
-                    "court_detection": "recorded-keypoints+randsac-homography",
-                    "tracking": self.config.tracking_variant,
+                    "inference_source": "canonical_clip",
+                    "court_detection": "YOLO26-pose+ransac-homography",
+                    "tracking": "harmonic-mean-eiou+OSNet",
                     "reid": "nearest-reentry-in-unclamped-2d-court-space",
-                    "action_source": "adjacent-a-b-court-position-heuristic",
-                    "fixture_source_frame_count": source_last_frame + 1,
+                    "action_source": "RT-DETRv4-X3D",
+                    "provider_metadata": inferred.metadata,
+                    "decoded_source_frame_count": source_last_frame + 1,
                     "canonical_frame_count": destination_frames,
                 },
             }
@@ -187,7 +171,7 @@ class AnalysisPipeline:
                 for frame_index, ball in balls.items()
             },
         )
-        reporter(0.94, "callback")
+        reporter(0.98, "analysis_bundle_ready")
         return AnalysisBundle(result=result, overlay_bytes=overlay)
 
     def _project_frames(
@@ -279,6 +263,10 @@ class AnalysisPipeline:
         balls: dict[int, BallObservation],
         players: dict[int, tuple[PlayerObservation, ...]],
         homographies: dict[int, NDArray[np.float64]],
+        *,
+        actions: dict[tuple[int, int], ActionObservation],
+        frame_width: int,
+        frame_height: int,
     ) -> list[dict[str, Any]]:
         events: list[dict[str, Any]] = []
         total_frames = int(job.clip.video.total_frames)
@@ -295,8 +283,8 @@ class AnalysisPipeline:
                 is_terminal=point.is_terminal,
                 balls=balls,
                 players=players,
-                frame_width=self.config.fixture_frame_width,
-                frame_height=self.config.fixture_frame_height,
+                frame_width=frame_width,
+                frame_height=frame_height,
             )
             actor = self._actor(
                 association.player, association.observation_frame, association.confidence
@@ -306,10 +294,24 @@ class AnalysisPipeline:
                 association.ball,
                 association.observation_frame,
                 homographies,
-                frame_width=self.config.fixture_frame_width,
-                frame_height=self.config.fixture_frame_height,
+                frame_width=frame_width,
+                frame_height=frame_height,
                 terminal=point.is_terminal,
             )
+            if actor is not None and association.player is not None:
+                action = self._nearest_action(
+                    actions,
+                    frame_index=association.observation_frame,
+                    track_id=association.player.source_track_id,
+                )
+                if action is not None:
+                    actor["action"] = {
+                        "label": action.label,
+                        "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",
+                        "taxonomy_version": "1",
+                        "confidence": action.confidence,
+                        "attributes": {"source": "RT-DETRv4-X3D"},
+                    }
             events.append(
                 {
                     "key_point_id": point.key_point_id,
@@ -336,13 +338,13 @@ class AnalysisPipeline:
                                 "x": association.ball.frame_pos[0],
                                 "y": association.ball.frame_pos[1],
                             },
-                            "confidence": 1.0,
+                            "confidence": association.ball.confidence,
                         }
                     ),
                     "representative_court_positions": (
                         [] if representative is None else [representative]
                     ),
-                    "quality_flags": ["fixture_ball_data", association.mode],
+                    "quality_flags": [association.mode],
                     "extensions": {
                         "authoritative_clip_pts": point.clip_pts,
                         "authoritative_clip_time_us": point.clip_time_us,
@@ -350,6 +352,25 @@ class AnalysisPipeline:
                 }
             )
         return events
+
+    @staticmethod
+    def _nearest_action(
+        actions: dict[tuple[int, int], ActionObservation],
+        *,
+        frame_index: int | None,
+        track_id: int,
+        radius: int = 3,
+    ) -> ActionObservation | None:
+        if frame_index is None:
+            return None
+        candidates = [
+            action
+            for (candidate_frame, candidate_track), action in actions.items()
+            if candidate_track == track_id and abs(candidate_frame - frame_index) <= radius
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda action: abs(action.frame_index - frame_index))
 
     @staticmethod
     def _actor(
@@ -415,45 +436,6 @@ class AnalysisPipeline:
             "court_pos": {"x": court_pos[0], "y": court_pos[1]},
             "confidence": 0.65,
         }
-
-    @staticmethod
-    def _apply_actions(events: list[dict[str, Any]]) -> None:
-        for index, event in enumerate(events[:-1]):
-            actors = cast("list[dict[str, Any]]", event["actors"])
-            if len(actors) != 1:
-                continue
-            positions = cast("list[dict[str, Any]]", event["representative_court_positions"])
-            next_positions = cast(
-                "list[dict[str, Any]]",
-                events[index + 1]["representative_court_positions"],
-            )
-            start = AnalysisPipeline._court_tuple(positions)
-            end = AnalysisPipeline._court_tuple(next_positions)
-            classification = classify_action(
-                start,
-                end,
-            )
-            if classification is None:
-                continue
-            label, crosses_court = classification
-            actors[0]["action"] = {
-                "label": label,
-                "taxonomy_id": "volleyball-analysis-engine.ball-path-heuristic",
-                "taxonomy_version": "1",
-                "confidence": 0.72,
-                "attributes": {
-                    "heuristic": True,
-                    "source": "adjacent_event_court_positions",
-                    "crosses_court": crosses_court,
-                },
-            }
-
-    @staticmethod
-    def _court_tuple(positions: list[dict[str, Any]]) -> tuple[float, float] | None:
-        if not positions:
-            return None
-        court = cast("dict[str, Any]", positions[0]["court_pos"])
-        return float(court["x"]), float(court["y"])
 
     @staticmethod
     def _build_tracks(frames: list[FrameObservation]) -> list[dict[str, Any]]:

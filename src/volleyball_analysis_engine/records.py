@@ -54,10 +54,21 @@ class PlayerObservation:
 
 @dataclass(frozen=True, slots=True)
 class BallObservation:
-    """Normalized ball position from the temporary fixed-data backend."""
+    """Normalized ball position inferred from the canonical clip."""
 
     frame_index: int
     frame_pos: tuple[float, float]
+    confidence: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ActionObservation:
+    """Provider-owned action prediction attached to an analysis-local track."""
+
+    frame_index: int
+    track_id: int
+    label: str
+    confidence: float | None
 
 
 @dataclass(frozen=True, slots=True)

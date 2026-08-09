@@ -3,12 +3,13 @@ name = "volleyball-analysis-engine"
 version = "0.1.0"
 description = "Outbound AI worker for volleyball-monitoring-ai"
 readme = "README.md"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.12,<3.13"
 dependencies = [
   "numpy>=2.2.0",
-  "opencv-python-headless>=4.11.0.86",
+  "opencv-python>=4.11.0.86,<5",
   "orjson>=3.10.15",
   "pydantic-settings>=2.10.0",
+  "scipy>=1.15.0",
   "volleyball-monitoring-ai-sdk",
 ]
 
@@ -27,9 +28,23 @@ dev = [
   "pytest-asyncio>=1.1.0",
   "ruff>=0.12.0",
 ]
+models = [
+  "calflops>=0.3.2",
+  "continual-inference>=1.2.4",
+  "faster-coco-eval>=1.6.5",
+  "fvcore>=0.1.5",
+  "iopath>=0.1.10",
+  "pillow>=11.0.0",
+  "pytorchvideo>=0.1.5",
+  "pyyaml>=6.0.2",
+  "tensorboard>=2.20.0",
+  "transformers>=4.55.0",
+  "ultralytics>=8.3.0,<9",
+]
 
 [project.scripts]
-volleyball-analysis-worker = "volleyball_analysis_engine.__main__:main"
+volleyball-analysis = "volleyball_analysis_engine.cli:main"
+volleyball-analysis-worker = "volleyball_analysis_engine.cli:worker_main"
 
 [build-system]
 requires = ["uv_build>=0.11.31,<0.12.0"]
@@ -74,6 +89,20 @@ ignore = ["COM812", "CPY001", "D203", "D213", "PLR0913", "TC001", "TC002", "TC00
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["D103", "FBT003", "PLR2004", "S101"]
+"src/volleyball_analysis_engine/artifacts.py" = ["C901", "EM101", "EM102", "TRY003"]
+"src/volleyball_analysis_engine/cli.py" = ["EM101", "EM102", "T201", "TRY003"]
+"src/volleyball_analysis_engine/config.py" = ["EM101", "PLR2004", "TRY003"]
+"src/volleyball_analysis_engine/inference.py" = [
+  "ANN401",
+  "C901",
+  "D107",
+  "EM101",
+  "EM102",
+  "PLR0915",
+  "PLR2004",
+  "TRY003",
+  "TRY300",
+]
 
 [tool.pyright]
 pythonVersion = "3.12"

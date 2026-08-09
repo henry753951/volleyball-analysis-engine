@@ -2,68 +2,74 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
 
-import orjson
 from volleyball_monitoring_ai import AIJobRequest, validate_overlay_bytes
 
-from volleyball_analysis_engine.pipeline import AnalysisPipeline, PipelineConfig
+from volleyball_analysis_engine.inference import InferenceResult
+from volleyball_analysis_engine.pipeline import AnalysisPipeline
+from volleyball_analysis_engine.records import (
+    ActionObservation,
+    BallObservation,
+    CourtFrame,
+    CourtKeypoint,
+    PlayerObservation,
+)
 
 
-def write_jsonl(path: Path, records: list[dict[str, Any]]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"".join(orjson.dumps(record) + b"\n" for record in records))
+class FakeProvider:
+    """In-memory model boundary used only by unit tests."""
 
-
-def fixture_root(tmp_path: Path) -> Path:
-    root = tmp_path / "handoff"
-    keypoints = [
-        {"index": index, "x_px": x, "y_px": y, "confidence": 0.99, "world_pos_m": [wx, wy]}
-        for index, (x, y, wx, wy) in enumerate(
-            [
-                (0, 0, 0, 0),
-                (50, 0, 6, 0),
-                (100, 0, 18, 0),
-                (0, 100, 0, 9),
-                (50, 100, 6, 9),
-                (100, 100, 18, 9),
-            ]
+    def infer(
+        self,
+        clip_path: Path,
+        job: AIJobRequest,
+        report: Callable[[float, str], None],
+    ) -> InferenceResult:
+        """Return deterministic observations without reading a fixture file."""
+        del clip_path, job, report
+        court_points = tuple(
+            CourtKeypoint(index, (x, y), 0.99, (wx, wy))
+            for index, (x, y, wx, wy) in enumerate(
+                [
+                    (0, 0, 0, 0),
+                    (50, 0, 6, 0),
+                    (100, 0, 18, 0),
+                    (0, 100, 0, 9),
+                    (50, 100, 6, 9),
+                    (100, 100, 18, 9),
+                ]
+            )
         )
-    ]
-    write_jsonl(
-        root / "tracking-data" / "court-keypoints.jsonl",
-        [{"frame_index": frame, "available": True, "keypoints": keypoints} for frame in range(3)],
-    )
-    write_jsonl(
-        root / "tracking-data" / "tracks-sam-deep-eiou.jsonl",
-        [
-            {
-                "frame_index": frame,
-                "players": [
-                    {
-                        "track_id": 1 if frame < 2 else 7,
-                        "frame_bbox": {"x1": 0.08, "y1": 0.2, "x2": 0.28, "y2": 0.7},
-                        "frame_foot_pos": {"x": 0.18, "y": 0.7},
-                        "court_pos": {"x": 0.2, "y": 0.5},
-                        "confidence": 0.9,
-                    }
-                ],
-            }
+        players = {
+            frame: (
+                PlayerObservation(
+                    frame_index=frame,
+                    source_track_id=1 if frame < 2 else 7,
+                    track_id=1 if frame < 2 else 7,
+                    frame_bbox=(0.08, 0.2, 0.28, 0.7),
+                    frame_foot_pos=(0.18, 0.7),
+                    court_pos=None,
+                    confidence=0.9,
+                ),
+            )
             for frame in range(3)
-        ],
-    )
-    ball = {
-        "coordinate_space": "normalized-video-frame",
-        "points": [
-            {"clip_frame_index": str(frame), "frame_pos": {"x": 0.18, "y": 0.45}}
-            for frame in range(3)
-        ],
-    }
-    (root / "input").mkdir(parents=True)
-    (root / "input" / "ball-annotations.manual.json").write_bytes(orjson.dumps(ball))
-    return root
+        }
+        return InferenceResult(
+            players=players,
+            courts={frame: CourtFrame(frame, True, court_points) for frame in range(3)},
+            balls={
+                frame: BallObservation(frame, (0.18, 0.45), 0.95) for frame in range(3)
+            },
+            actions={(0, 1): ActionObservation(0, 1, "setting", 0.88)},
+            frame_count=3,
+            frame_width=100,
+            frame_height=100,
+            fps=60.0,
+            metadata={"provider": "fake"},
+        )
 
 
 def job() -> AIJobRequest:
@@ -127,9 +133,14 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_overlay(
     tmp_path: Path,
 ) -> None:
     incoming = job()
-    bundle = AnalysisPipeline(PipelineConfig(fixture_root(tmp_path))).analyze(incoming)
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"unit-test")
+    bundle = AnalysisPipeline(FakeProvider()).analyze(incoming, clip)
     assert [event.anchor_frame_index for event in bundle.result.contact_events] == ["0", "2"]
     assert bundle.result.path_segments[0].start_frame_index == "0"
     assert bundle.result.path_segments[0].end_frame_index == "2"
     assert bundle.result.extensions["canonical_frame_count"] == 3
+    action = bundle.result.contact_events[0].actors[0].action
+    assert action is not None
+    assert action.label == "setting"
     validate_overlay_bytes(bundle.overlay_bytes)

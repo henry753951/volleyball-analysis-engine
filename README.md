@@ -1,85 +1,134 @@
 # volleyball-analysis-engine
 
-Outbound AI worker for `volleyball-monitoring-ai`. It uses the central repository's
-Python SDK as the wire authority, connects to the central provider WebSocket, accepts
-leased jobs, downloads and verifies the canonical clip, emits progress, and returns a
-contract-valid analysis JSON plus VOV1 FlatBuffer overlay through the signed callback.
+Headless `uv` project for running the external AI side of
+`volleyball-monitoring-ai`. Online and offline modes use the same model pipeline:
 
-## Current analysis backend
+```text
+canonical clip
+→ RT-DETRv4 + streaming X3D person/ball/action inference
+→ OSNet appearance embeddings
+→ harmonic-mean EIoU tracking with a retained lost pool
+→ YOLO court-keypoint pose + RANSAC homography
+→ same-side 2D-court re-entry identity merge (maximum six identities per side)
+→ human-keypoint contact association
+→ AnalysisResult JSON + VOV1 overlay + developer artifacts
+```
 
-The first vertical slice deliberately uses the recorded outputs in
-`volleyball-ai-contract-lab/ai-team-handoff`:
+The engine never reads Contract Lab tracking, ball or court JSON as inference output. Contract Lab
+and `sdk-analysis-visual-v5` are reference material only. Human `clip_pts`, `clip_time_us` and
+`clip_frame_index` values remain immutable anchors from the incoming job.
 
-- court keypoints are recomputed into an image-to-court homography with RANSAC;
-- player observations come from the saved SAM + Deep-EIoU tracking JSONL;
-- track fragments are merged by nearest re-entry position in canonical 2D court space,
-  independently on each court side and at most six identities per side;
-- hitter association uses the fixed human ball JSON accepted for this phase;
-- actions are explicitly marked as an A/B court-position heuristic, not model inference.
+## Repository layout
 
-The incoming job remains authoritative for clip SHA-256, immutable submission identity,
-key-point order, `clip_pts`, `clip_time_us`, and `clip_frame_index`. Fixture frames are
-scaled into the canonical clip frame domain; they never replace a key point's anchor.
-
-## Local setup
-
-Keep both repositories as siblings. The analysis engine resolves the current central
-SDK directly from `../volleyball-monitoring-ai/sdk`; it does not vendor or clone the
-central repository:
+Keep the central and AI repositories as siblings. The SDK is installed from the sibling path; it is
+not vendored or used as a subrepository.
 
 ```text
 H:\Repos\
+├── volleyball-monitoring-ai\
 ├── volleyball-analysis-engine\
-└── volleyball-monitoring-ai\
+└── volley-ai\
 ```
 
+Model files and the supplied RT-DETRv4 source are prepared under ignored `.artifacts/`; weights are
+never committed.
+
+## First-time setup on this machine
+
+The defaults point at the assets supplied for this project:
+
 ```powershell
-Copy-Item .env.example .env
-uv sync --extra dev
+.\scripts\setup-dev.ps1
+```
+
+This extracts `E:\User\Downloads\volleyball_ball_action.zip`, copies `best_stg1.pth` and the
+`orderfix` court-keypoint model, installs CUDA 13.0 PyTorch and model dependencies with `uv`, then
+runs the environment doctor and strictly loads both checkpoints. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to
+replace an earlier extraction.
+
+The default X3D temporal backend is the exact rolling-window implementation supplied with the
+model. `continual-inference` 1.2.4 cannot convert PyTorchVideo's `ResNetBasicStem`; selecting
+`VOLLYAI_RTV4_BACKEND=continual` therefore attempts conversion and records an explicit fallback
+to `rolling` instead of silently changing inference semantics.
+
+Strictly load all checkpoints and inspect a clip:
+
+```powershell
+.\scripts\doctor.ps1 `
+  -LoadModels `
+  -Clip "H:\Repos\volleyball-ai-contract-lab\.data\exports\8469a80e-c0f5-4a57-8859-c8371de7c755\clip.mp4"
+```
+
+## Offline mode (no network)
+
+Offline mode does not create an AI worker client, WebSocket, downloader or callback client. It
+accepts the same online-shaped job so immutable IDs and media metadata stay contract-valid. An
+optional standalone key-point JSON list can replace `job.key_points` for manual experiments.
+
+```powershell
+.\scripts\run-offline.ps1 `
+  -Job "H:\Repos\volleyball-ai-contract-lab\.data\exports\8469a80e-c0f5-4a57-8859-c8371de7c755\ai-job.json" `
+  -Clip "H:\Repos\volleyball-ai-contract-lab\.data\exports\8469a80e-c0f5-4a57-8859-c8371de7c755\clip.mp4" `
+  -Output ".\outputs\sample"
+```
+
+Output:
+
+```text
+outputs/sample/
+├── analysis-result.json
+├── overlay.vov1
+├── offline-run.json
+├── inference-manifest.json
+├── tracks.jsonl
+├── ball.jsonl
+├── court.jsonl
+├── actions.jsonl
+└── overlay.mp4
+```
+
+`overlay.mp4` is rendered through FFmpeg as H.264/yuv420p with AAC audio and `+faststart`.
+
+For a manually edited marker file, pass either a JSON array of `KeyPointInput` objects or an
+object shaped as `{ "key_points": [...] }`:
+
+```powershell
+.\scripts\run-offline.ps1 `
+  -Job ".\inputs\ai-job.json" `
+  -Keypoints ".\inputs\keypoints.json" `
+  -Clip ".\inputs\clip.mp4" `
+  -Output ".\outputs\manual-run"
+```
+
+The key-point file replaces only `job.key_points`; media identity, immutable submission IDs,
+clip hash, frame rate and time base still come from the validated job envelope.
+
+## Online worker mode
+
+Copy `.env.example` to `.env` for persistent local values, or pass connection secrets to the
+PowerShell launcher:
+
+```powershell
+.\scripts\run-online-worker.ps1 `
+  -CentralUrl "ws://localhost:4000/api/v1/ai/providers/ws" `
+  -IntegrationId "00000000-0000-4000-8000-000000000001" `
+  -Token "replace-with-provider-token" `
+  -WorkerId "analysis-worker-local"
+```
+
+The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
+downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
+typed result through the authenticated callback.
+
+## Quality gates
+
+```powershell
 uv run ruff check .
 uv run pyright
 uv run pytest
-uv run volleyball-analysis-worker
 ```
 
-Set `VOLLYAI_FIXTURE_ROOT` to:
-
-```text
-H:\Repos\volleyball-ai-contract-lab\ai-team-handoff
-```
-
-The project follows uv's explicit PyTorch-index pattern. `uv sync --extra cpu` uses the
-CPU wheel index and `uv sync --extra cu130` selects CUDA 13.0; the extras conflict so a
-single environment cannot accidentally mix backends.
-
-## Container
-
-Docker Compose exposes the sibling `../volleyball-monitoring-ai` repository as a named
-read-only build context named `central`. Nothing from the central repository is stored
-inside this Git repository. Configure `.env`, set the host fixture path and start the
-worker:
-
-```powershell
-$env:VOLLYAI_REFERENCE_ROOT='H:\Repos\volleyball-ai-contract-lab\ai-team-handoff'
-docker compose up --build
-```
-
-For a direct Docker build, provide the same named context explicitly:
-
-```powershell
-docker build --build-context central=../volleyball-monitoring-ai .
-```
-
-The worker is outbound-only and exposes no inference HTTP port. Horizontal replicas
-use distinct `VOLLYAI_INSTANCE_ID` values; the central server selects the globally
-least-loaded online instance by active jobs divided by declared concurrency.
-
-## Verified integration
-
-The 2026-08-09 local integration run connected two one-slot containers to the central
-WebSocket gateway. A real 398-frame OME canonical clip was assigned to
-`analysis-worker-01`, completed through the signed multipart callback, and persisted as
-12 court-side tracks (6 left / 6 right), two immutable key-point associations, one ball
-path, four overlay chunks and four analysis artifacts. The service/contact anchors
-remained exactly aligned at clip frames 180 and 218 from worker input through central
-ingest. Identity mapping is intentionally a separate downstream operator step.
+The model source and checkpoints are trusted local assets supplied by the project owner. The engine
+loads the RT-DETRv4 checkpoint with an exact `strict=True` state-dict match against
+`rtv4_x3d_volleyball_v4a_decoupled.yml`. The supplied checkpoint is the 5-frame model
+(`120/240/480` encoder channels); the similarly named 7-frame config is intentionally rejected.

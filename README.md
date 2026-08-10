@@ -10,8 +10,9 @@ canonical clip
 → harmonic-mean EIoU tracking with a retained lost pool
 → YOLO court-keypoint pose + RANSAC homography
 → same-side 2D-court re-entry identity merge (maximum six identities per side)
-→ human-keypoint contact association
-→ AnalysisResult JSON + VOV1 overlay + developer artifacts
+→ ball-trajectory contact proposal detection between human service/end boundaries
+→ contact-to-player association
+→ AnalysisResult 1.1 JSON + VOV1 overlay + developer artifacts
 ```
 
 The engine never reads Contract Lab tracking, ball or court JSON as inference output. Contract Lab

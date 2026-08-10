@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 import numpy as np
 from numpy.typing import NDArray
@@ -19,9 +19,11 @@ from volleyball_monitoring_ai import (
     build_tracking_overlay,
     validate_passthrough,
 )
+from volleyball_monitoring_ai.models import KeyPointInput
 
 from .artifacts import write_inference_artifacts
 from .association import associate_hit
+from .contact_detection import detect_contact_proposals
 from .geometry import estimate_homography, project_normalized_frame_point
 from .inference import ObservationProvider
 from .records import (
@@ -49,10 +51,23 @@ class PipelineConfig:
     association_search_seconds: float = 0.25
 
 
+@dataclass(frozen=True, slots=True)
+class _EventSpec:
+    anchor: int
+    key_point_id: str
+    source_key_point_id: str | None
+    anchor_origin: str
+    marker_kind: str
+    is_terminal: bool
+    detection_confidence: float | None
+    point: KeyPointInput | None
+    detection: dict[str, str | float] | None
+
+
 class AnalysisPipeline:
     """Produce contract-valid result and overlay artifacts for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-reid-visual-v5-0.3.1"
+    analysis_version = "rtv4-x3d-court-reid-contact-proposals-0.5.0"
 
     def __init__(
         self,
@@ -118,7 +133,7 @@ class AnalysisPipeline:
         )
         result = AnalysisResult.model_validate(
             {
-                "schema_version": "1.0.0",
+                "schema_version": "1.1.0",
                 "analysis_id": analysis_id,
                 "analysis_version": self.analysis_version,
                 "ai_job_id": job.ai_job_id,
@@ -131,7 +146,7 @@ class AnalysisPipeline:
                 "producer": {
                     "name": "volleyball-analysis-engine",
                     "build_id": self.analysis_version,
-                    "sdk_version": "0.3.0",
+                    "sdk_version": "0.4.0",
                 },
                 "tracks": tracks,
                 "contact_events": events,
@@ -323,19 +338,67 @@ class AnalysisPipeline:
         total_frames = int(job.clip.video.total_frames)
         fps = int(job.clip.video.fps.num) / int(job.clip.video.fps.den)
         action_search_radius = max(3, round(fps * self.config.association_search_seconds))
-        for index, point in enumerate(job.key_points):
-            anchor = int(point.clip_frame_index)
-            previous_anchor = int(job.key_points[index - 1].clip_frame_index) if index > 0 else -1
+        human_specs = [
+            _EventSpec(
+                anchor=int(point.clip_frame_index),
+                key_point_id=point.key_point_id,
+                source_key_point_id=point.key_point_id,
+                anchor_origin="human_anchor",
+                marker_kind=point.marker_kind,
+                is_terminal=point.is_terminal,
+                detection_confidence=None,
+                point=point,
+                detection=None,
+            )
+            for point in job.key_points
+        ]
+        first_anchor = min(int(point.clip_frame_index) for point in job.key_points)
+        last_anchor = max(int(point.clip_frame_index) for point in job.key_points)
+        proposals = detect_contact_proposals(
+            balls,
+            start_frame=first_anchor,
+            end_frame=last_anchor,
+            fps=fps,
+            protected_frames={int(point.clip_frame_index) for point in job.key_points},
+        )
+        specs = human_specs + [
+            _EventSpec(
+                anchor=proposal.frame_index,
+                key_point_id=str(
+                    uuid5(
+                        NAMESPACE_URL,
+                        f"volleyball-contact:{job.rally_submission_id}:{proposal.frame_index}:v1",
+                    )
+                ),
+                source_key_point_id=None,
+                anchor_origin="ai_detected",
+                marker_kind="contact",
+                is_terminal=False,
+                detection_confidence=proposal.confidence,
+                point=None,
+                detection={
+                    "method": "ball_trajectory_change_v1",
+                    "direction_change": proposal.direction_change,
+                    "acceleration": proposal.acceleration,
+                    "speed_ratio": proposal.speed_ratio,
+                },
+            )
+            for proposal in proposals
+        ]
+        specs.sort(key=lambda item: (item.anchor, item.anchor_origin != "human_anchor"))
+        for index, spec in enumerate(specs):
+            anchor = spec.anchor
+            previous_anchor = specs[index - 1].anchor if index > 0 else -1
             next_anchor = (
-                int(job.key_points[index + 1].clip_frame_index)
-                if index + 1 < len(job.key_points)
+                specs[index + 1].anchor
+                if index + 1 < len(specs)
                 else total_frames
             )
             association = associate_hit(
                 anchor_frame=anchor,
                 previous_anchor_frame=previous_anchor,
                 next_anchor_frame=next_anchor,
-                is_terminal=point.is_terminal,
+                is_terminal=spec.is_terminal,
                 balls=balls,
                 players=players,
                 actions=actions,
@@ -353,7 +416,7 @@ class AnalysisPipeline:
                 homographies,
                 frame_width=frame_width,
                 frame_height=frame_height,
-                terminal=point.is_terminal,
+                terminal=spec.is_terminal,
             )
             if actor is not None and association.player is not None:
                 action = self._nearest_action(
@@ -372,12 +435,15 @@ class AnalysisPipeline:
                     }
             events.append(
                 {
-                    "key_point_id": point.key_point_id,
-                    "sequence_index": point.sequence_index,
-                    "marker_kind": point.marker_kind,
-                    "is_terminal": point.is_terminal,
-                    # This exact passthrough is the PTS/frame alignment boundary.
-                    "anchor_frame_index": point.clip_frame_index,
+                    "key_point_id": spec.key_point_id,
+                    "source_key_point_id": spec.source_key_point_id,
+                    "anchor_origin": spec.anchor_origin,
+                    "detection_confidence": spec.detection_confidence,
+                    "sequence_index": index,
+                    "marker_kind": spec.marker_kind,
+                    "is_terminal": spec.is_terminal,
+                    # Human frames remain exact passthrough; detected frames stay canonical.
+                    "anchor_frame_index": str(anchor),
                     "resolved_frame_index": (
                         None
                         if association.observation_frame is None
@@ -402,11 +468,22 @@ class AnalysisPipeline:
                     "representative_court_positions": (
                         [] if representative is None else [representative]
                     ),
-                    "quality_flags": [association.mode],
-                    "extensions": {
-                        "authoritative_clip_pts": point.clip_pts,
-                        "authoritative_clip_time_us": point.clip_time_us,
-                    },
+                    "quality_flags": [
+                        association.mode,
+                        *(
+                            ("trajectory_contact_proposal",)
+                            if spec.anchor_origin == "ai_detected"
+                            else ()
+                        ),
+                    ],
+                    "extensions": (
+                        {
+                            "authoritative_clip_pts": spec.point.clip_pts,
+                            "authoritative_clip_time_us": spec.point.clip_time_us,
+                        }
+                        if spec.point is not None
+                        else {"detection": spec.detection}
+                    ),
                 }
             )
         return events

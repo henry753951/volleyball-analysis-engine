@@ -1683,7 +1683,7 @@ wheels = [
 
 [[package]]
 name = "volleyball-analysis-engine"
-version = "0.4.1"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "numpy" },
@@ -1757,7 +1757,7 @@ provides-extras = ["cpu", "cu130", "dev", "models"]
 
 [[package]]
 name = "volleyball-monitoring-ai-sdk"
-version = "0.3.0"
+version = "0.4.0"
 source = { directory = "../volleyball-monitoring-ai/sdk" }
 dependencies = [
     { name = "flatbuffers" },

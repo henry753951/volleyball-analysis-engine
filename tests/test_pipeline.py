@@ -136,6 +136,8 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_overlay(
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"unit-test")
     bundle = AnalysisPipeline(FakeProvider()).analyze(incoming, clip)
+    assert bundle.result.schema_version == "1.1.0"
+    assert bundle.result.producer.sdk_version == "0.4.0"
     assert [event.anchor_frame_index for event in bundle.result.contact_events] == ["0", "2"]
     assert bundle.result.path_segments[0].start_frame_index == "0"
     assert bundle.result.path_segments[0].end_frame_index == "2"

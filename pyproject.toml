@@ -1,6 +1,6 @@
 [project]
 name = "volleyball-analysis-engine"
-version = "0.4.1"
+version = "0.5.0"
 description = "Outbound AI worker for volleyball-monitoring-ai"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

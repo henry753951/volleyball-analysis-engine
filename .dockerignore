@@ -1,6 +1,9 @@
-.git
-.venv
-.pytest_cache
-.ruff_cache
-**/__pycache__
-workspaces
+# The engine image only needs dependency metadata and Python runtime sources.
+# Keep model artifacts, workspaces, test output, and local environments out of
+# the Docker context so uploads remain small and deterministic.
+**
+!pyproject.toml
+!uv.lock
+!README.md
+!src/
+!src/**

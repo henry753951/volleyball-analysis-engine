@@ -2,16 +2,24 @@
 param(
     [string]$CentralUrl = "ws://localhost:4000/api/v1/ai/providers/ws",
     [Parameter(Mandatory = $true)][string]$Token,
-    [string]$WorkerId = "analysis-worker-local",
-    [int]$Concurrency = 1
+    [Alias("WorkerId")]
+    [string]$InstanceKey = "analysis-worker-local",
+    [int]$Concurrency = 1,
+    [string]$CourtCheckpoint = ".artifacts/models/court-keypoints-video91-canonical-v4.pt",
+    [int]$CourtStride = 1,
+    [int]$CourtImageSize = 1280
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$checkpoint = (Resolve-Path (Join-Path $projectRoot $CourtCheckpoint)).Path
 $env:VOLLYAI_SERVER_WS_URL = $CentralUrl
 $env:VOLLYAI_TOKEN = $Token
-$env:VOLLYAI_INSTANCE_ID = $WorkerId
+$env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
+$env:VOLLYAI_COURT_CHECKPOINT = $checkpoint
+$env:VOLLYAI_COURT_STRIDE = [string]$CourtStride
+$env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
 Push-Location $projectRoot
 try {
     uv run volleyball-analysis worker

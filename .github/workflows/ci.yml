@@ -1,0 +1,41 @@
+name: ci
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: volleyball-analysis-engine
+      - uses: actions/checkout@v4
+        with:
+          repository: henry753951/volleyball-monitoring-ai
+          path: volleyball-monitoring-ai
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
+        with:
+          version: '0.11.31'
+          enable-cache: true
+          cache-dependency-glob: volleyball-analysis-engine/uv.lock
+      - name: Install frozen validation environment
+        run: uv sync --project volleyball-analysis-engine --frozen --extra cpu --extra models --extra dev
+      - name: Validate
+        working-directory: volleyball-analysis-engine
+        run: |
+          uv run --no-sync ruff check .
+          uv run --no-sync pyright
+          uv run --no-sync pytest
+

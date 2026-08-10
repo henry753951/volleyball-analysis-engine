@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment  # pyright: ignore[reportUnknownVariableType]
 from volleyball_monitoring_ai import AIJobRequest
 
+from .geometry import estimate_homography
 from .records import (
     ActionObservation,
     BallObservation,
@@ -323,7 +324,8 @@ class Rtv4X3DObservationProvider:
         device: str = "cuda:0",
         backend: str = "continual",
         detector_threshold: float = 0.4,
-        court_stride: int = 30,
+        court_stride: int = 1,
+        court_imgsz: int = 1280,
         disable_amp: bool = False,
     ) -> None:
         paths.validate()
@@ -332,6 +334,7 @@ class Rtv4X3DObservationProvider:
         self.backend = backend
         self.detector_threshold = detector_threshold
         self.court_stride = max(1, court_stride)
+        self.court_imgsz = court_imgsz
         self.disable_amp = disable_amp
         self._torch: Any = None
         self._model: Any = None
@@ -700,7 +703,7 @@ class Rtv4X3DObservationProvider:
     ) -> CourtFrame | None:
         results = self._court_model.predict(
             source=frame,
-            imgsz=640,
+            imgsz=self.court_imgsz,
             device=self.device_name,
             conf=0.25,
             verbose=False,
@@ -730,7 +733,12 @@ class Rtv4X3DObservationProvider:
             )
             for index, position in enumerate(positions)
         )
-        return CourtFrame(frame_index=frame_index, available=True, keypoints=keypoints)
+        court = CourtFrame(frame_index=frame_index, available=True, keypoints=keypoints)
+        # Keep false positive keypoint clouds from close-ups and replay shots out
+        # of both projection and visualization. The downstream geometry contract
+        # already requires six RANSAC-consistent base points, so rejecting here
+        # does not discard a court that the pipeline could otherwise use.
+        return court if estimate_homography(court) is not None else None
 
     @staticmethod
     def _install_cython_bbox_fallback() -> None:

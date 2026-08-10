@@ -24,6 +24,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: henry753951/volleyball-monitoring-ai
+          token: ${{ secrets.CENTRAL_REPO_TOKEN }}
           path: volleyball-monitoring-ai
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b
         with:
@@ -38,4 +39,3 @@ jobs:
           uv run --no-sync ruff check .
           uv run --no-sync pyright
           uv run --no-sync pytest
-

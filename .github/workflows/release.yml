@@ -46,6 +46,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Reclaim runner disk for CUDA image
+        shell: bash
+        run: |
+          before=$(df --output=avail -B1 / | tail -1)
+          for path in /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL; do
+            if [[ -d "$path" ]]; then
+              sudo rm -rf --one-file-system "$path"
+            fi
+          done
+          docker system prune --all --force
+          after=$(df --output=avail -B1 / | tail -1)
+          echo "Reclaimed $((after - before)) bytes; $after bytes available"
       - uses: docker/setup-buildx-action@v3
       - name: Docker metadata
         id: metadata
@@ -68,6 +80,6 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           cache-from: type=gha,scope=analysis-worker
-          cache-to: type=gha,mode=max,scope=analysis-worker
+          cache-to: type=gha,mode=min,scope=analysis-worker
           provenance: mode=max
           sbom: true

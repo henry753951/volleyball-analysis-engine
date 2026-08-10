@@ -12,16 +12,18 @@ services:
       VOLLYAI_WORKSPACE: /workspaces
       VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cpu}
       VOLLYAI_RTV4_BACKEND: ${VOLLYAI_RTV4_BACKEND:-rolling}
+      VOLLYAI_COURT_STRIDE: ${VOLLYAI_COURT_STRIDE:-1}
+      VOLLYAI_COURT_IMGSZ: ${VOLLYAI_COURT_IMGSZ:-1280}
       VOLLYAI_RTV4_ROOT: /models/rtv4
       VOLLYAI_RTV4_CONFIG: /models/rtv4/configs/rtv4/rtv4_x3d_volleyball_v4a_decoupled.yml
       VOLLYAI_RTV4_CHECKPOINT: /models/checkpoints/best_stg1.pth
-      VOLLYAI_COURT_CHECKPOINT: /models/checkpoints/court-keypoints.pt
+      VOLLYAI_COURT_CHECKPOINT: /models/checkpoints/court-keypoints-video91-canonical-v4.pt
       VOLLYAI_SMP_ROOT: /models/smp
       VOLLYAI_OSNET_CHECKPOINT: /models/smp/selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60
     volumes:
       - ${VOLLYAI_RTV4_HOST_ROOT:?Set VOLLYAI_RTV4_HOST_ROOT to the extracted RT-DETRv4 source}:/models/rtv4:ro
       - ${VOLLYAI_RTV4_CHECKPOINT_HOST:?Set VOLLYAI_RTV4_CHECKPOINT_HOST}:/models/checkpoints/best_stg1.pth:ro
-      - ${VOLLYAI_COURT_CHECKPOINT_HOST:?Set VOLLYAI_COURT_CHECKPOINT_HOST}:/models/checkpoints/court-keypoints.pt:ro
+      - ${VOLLYAI_COURT_CHECKPOINT_HOST:?Set VOLLYAI_COURT_CHECKPOINT_HOST}:/models/checkpoints/court-keypoints-video91-canonical-v4.pt:ro
       - ${VOLLYAI_SMP_HOST_ROOT:?Set VOLLYAI_SMP_HOST_ROOT}:/models/smp:ro
       - analysis-workspaces:/workspaces
     restart: unless-stopped

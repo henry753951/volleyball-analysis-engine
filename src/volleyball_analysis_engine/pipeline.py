@@ -24,7 +24,13 @@ from .artifacts import write_inference_artifacts
 from .association import associate_hit
 from .geometry import estimate_homography, project_normalized_frame_point
 from .inference import ObservationProvider
-from .records import ActionObservation, BallObservation, FrameObservation, PlayerObservation
+from .records import (
+    ActionObservation,
+    BallObservation,
+    CourtFrame,
+    FrameObservation,
+    PlayerObservation,
+)
 from .reid import CourtPositionReidentifier
 
 ProgressReporter = Callable[[float, str], None]
@@ -170,11 +176,24 @@ class AnalysisPipeline:
             job,
             analysis_id=analysis_id,
             analysis_version=self.analysis_version,
-            frame_records=self._overlay_records(frames),
+            frame_records=self._overlay_records(frames, actions),
             ball_positions={
-                frame_index: {"x": ball.frame_pos[0], "y": ball.frame_pos[1]}
+                frame_index: {
+                    "x": ball.frame_pos[0],
+                    "y": ball.frame_pos[1],
+                    "confidence": ball.confidence,
+                }
                 for frame_index, ball in balls.items()
             },
+            court_keypoints=self._overlay_court_keypoints(
+                inferred.courts,
+                source_last_frame=source_last_frame,
+                destination_frames=destination_frames,
+                frame_width=inferred.frame_width,
+                frame_height=inferred.frame_height,
+            ),
+            action_taxonomy_id="volleyball-analysis-engine.rtv4-x3d-actions",
+            action_taxonomy_version="1",
         )
         reporter(0.98, "analysis_bundle_ready")
         return AnalysisBundle(result=result, overlay_bytes=overlay)
@@ -536,13 +555,17 @@ class AnalysisPipeline:
         return paths
 
     @staticmethod
-    def _overlay_records(frames: list[FrameObservation]) -> list[dict[str, Any]]:
+    def _overlay_records(
+        frames: list[FrameObservation],
+        actions: dict[tuple[int, int], ActionObservation],
+    ) -> list[dict[str, Any]]:
         return [
             {
                 "frame_index": frame.frame_index,
                 "players": [
                     {
                         "track_id": player.track_id,
+                        "confidence": player.confidence,
                         "frame_bbox": {
                             "x1": player.frame_bbox[0],
                             "y1": player.frame_bbox[1],
@@ -558,9 +581,61 @@ class AnalysisPipeline:
                             if player.court_pos is None
                             else {"x": player.court_pos[0], "y": player.court_pos[1]}
                         ),
+                        "action_label": (
+                            actions[(frame.frame_index, player.source_track_id)].label
+                            if (frame.frame_index, player.source_track_id) in actions
+                            else None
+                        ),
+                        "action_confidence": (
+                            actions[(frame.frame_index, player.source_track_id)].confidence
+                            if (frame.frame_index, player.source_track_id) in actions
+                            else None
+                        ),
                     }
                     for player in frame.players
                 ],
             }
             for frame in frames
         ]
+
+    @classmethod
+    def _overlay_court_keypoints(
+        cls,
+        courts: dict[int, CourtFrame],
+        *,
+        source_last_frame: int,
+        destination_frames: int,
+        frame_width: int,
+        frame_height: int,
+    ) -> dict[int, list[dict[str, Any]]]:
+        """Map and hold the latest valid court pose across canonical frames."""
+        mapped: dict[int, list[dict[str, Any]]] = {}
+        for source_frame, court in sorted(courts.items()):
+            if not court.available:
+                continue
+            frame_index = cls._map_frame(
+                source_frame,
+                source_last_frame,
+                destination_frames,
+            )
+            mapped[frame_index] = [
+                {
+                    "keypoint_id": keypoint.index,
+                    "frame_pos": {
+                        "x": keypoint.frame_pos_px[0] / frame_width,
+                        "y": keypoint.frame_pos_px[1] / frame_height,
+                    },
+                    "confidence": keypoint.confidence,
+                }
+                for keypoint in court.keypoints
+                if keypoint.frame_pos_px is not None
+            ]
+
+        result: dict[int, list[dict[str, Any]]] = {}
+        active: list[dict[str, Any]] | None = None
+        for frame_index in range(destination_frames):
+            if frame_index in mapped:
+                active = mapped[frame_index]
+            if active is not None:
+                result[frame_index] = active
+        return result

@@ -103,6 +103,7 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         backend=settings.rtv4_backend,
         detector_threshold=settings.detector_threshold,
         court_stride=settings.court_stride,
+        court_imgsz=settings.court_imgsz,
         disable_amp=settings.disable_amp,
     )
     return AnalysisPipeline(provider, PipelineConfig())

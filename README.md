@@ -118,15 +118,27 @@ PowerShell launcher:
 
 ```powershell
 .\scripts\run-online-worker.ps1 `
-  -CentralUrl "ws://localhost:4000/api/v1/ai/providers/ws" `
-  -IntegrationId "00000000-0000-4000-8000-000000000001" `
-  -Token "replace-with-provider-token" `
-  -WorkerId "analysis-worker-local"
+  -CentralUrl "ws://localhost:10000/api/v1/ai/providers/ws" `
+  -Token "vmai_replace-with-worker-access-token" `
+  -InstanceKey "analysis-worker-local"
 ```
+
+Create or rotate the Worker Access Token from the central server operations console. The current
+protocol has no Integration ID: the bearer token authenticates the worker pool, while
+`InstanceKey` identifies this worker process. Port `10000` is the Docker Compose host mapping;
+use port `4000` when the central server itself runs directly on the host.
 
 The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
+
+For the local Docker Compose central server, create a managed Worker Token and start the worker in
+one command. The token is passed only through the child-process environment and is not written to
+the log:
+
+```powershell
+.\scripts\start-local-worker.ps1
+```
 
 ## Quality gates
 

@@ -10,6 +10,7 @@ dependencies = [
   "orjson>=3.10.15",
   "pydantic-settings>=2.10.0",
   "scipy>=1.15.0",
+  "volley-court-lines",
   "volleyball-monitoring-ai-sdk",
 ]
 
@@ -68,6 +69,7 @@ torchvision = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu130", extra = "cu130" },
 ]
+volley-court-lines = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.0/volley_court_lines-0.1.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

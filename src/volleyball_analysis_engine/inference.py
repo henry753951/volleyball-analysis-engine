@@ -5,12 +5,12 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
-import math
 import sys
 import types
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol, cast
 
 import cv2
@@ -19,12 +19,11 @@ from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment  # pyright: ignore[reportUnknownVariableType]
 from volleyball_monitoring_ai import AIJobRequest
 
-from .geometry import estimate_homography
+from .court import CourtLineEstimator
 from .records import (
     ActionObservation,
     BallObservation,
     CourtFrame,
-    CourtKeypoint,
     PlayerObservation,
 )
 
@@ -59,18 +58,6 @@ def normalize_frame_bbox(
     left, right = sorted((_unit_interval(x1 / width), _unit_interval(x2 / width)))
     top, bottom = sorted((_unit_interval(y1 / height), _unit_interval(y2 / height)))
     return left, top, right, bottom
-COURT_WORLD_POINTS = (
-    (0.0, 0.0),
-    (6.0, 0.0),
-    (9.0, 0.0),
-    (12.0, 0.0),
-    (18.0, 0.0),
-    (18.0, 9.0),
-    (12.0, 9.0),
-    (9.0, 9.0),
-    (6.0, 9.0),
-    (0.0, 9.0),
-)
 
 
 def _empty_metadata() -> dict[str, Any]:
@@ -112,7 +99,6 @@ class ModelPaths:
     rtv4_root: Path
     rtv4_config: Path
     rtv4_checkpoint: Path
-    court_checkpoint: Path
     smp_root: Path
     osnet_checkpoint: Path
 
@@ -122,9 +108,7 @@ class ModelPaths:
             "RT-DETRv4 root": self.rtv4_root / "engine" / "core" / "yaml_config.py",
             "RT-DETRv4 config": self.rtv4_config,
             "RT-DETRv4 checkpoint": self.rtv4_checkpoint,
-            "court keypose checkpoint": self.court_checkpoint,
-            "selective-mask-propagation root": self.smp_root
-            / "selective_mask_propagation",
+            "selective-mask-propagation root": self.smp_root / "selective_mask_propagation",
             "OSNet checkpoint": self.osnet_checkpoint,
         }
         missing = [f"{label}: {path}" for label, path in required.items() if not path.exists()]
@@ -149,6 +133,17 @@ class _TrackedDetection:
     score: float
 
 
+@dataclass(frozen=True, slots=True)
+class _DetectorObservations:
+    players: tuple[PlayerObservation, ...]
+    ball: BallObservation | None
+    actions: tuple[ActionObservation, ...]
+    detector_seconds: float
+    postprocess_seconds: float
+    embedding_seconds: float
+    tracking_seconds: float
+
+
 class HarmonicMeanTracker:
     """Appearance/EIoU tracker with a bounded keep-all lost pool."""
 
@@ -168,7 +163,7 @@ class HarmonicMeanTracker:
         frame_index: int,
         boxes: NDArray[np.float32],
         scores: NDArray[np.float32],
-        embeddings: NDArray[np.float32],
+        embeddings: NDArray[np.float32] | None,
     ) -> list[_TrackedDetection]:
         """Associate every current person detection without capping raw identities."""
         self._tracks = {
@@ -182,14 +177,17 @@ class HarmonicMeanTracker:
             similarity = np.zeros((len(active), len(boxes)), dtype=np.float32)
             for row, track in enumerate(active):
                 geometry = _eiou_similarity(track.bbox, boxes)
-                appearance = _cosine_similarity(track.embedding, embeddings)
-                denominator = geometry + appearance
-                similarity[row] = np.divide(
-                    2.0 * geometry * appearance,
-                    denominator,
-                    out=np.zeros_like(geometry),
-                    where=denominator > 1e-6,
-                )
+                if embeddings is None or np.linalg.norm(track.embedding) <= 1e-6:
+                    similarity[row] = geometry
+                else:
+                    appearance = _cosine_similarity(track.embedding, embeddings)
+                    denominator = geometry + appearance
+                    similarity[row] = np.divide(
+                        2.0 * geometry * appearance,
+                        denominator,
+                        out=np.zeros_like(geometry),
+                        where=denominator > 1e-6,
+                    )
             assignment = cast(
                 "tuple[NDArray[np.int64], NDArray[np.int64]]",
                 linear_sum_assignment(1.0 - similarity),
@@ -206,10 +204,15 @@ class HarmonicMeanTracker:
         for row, detection_index in matches:
             track = active[row]
             track.bbox = boxes[detection_index].copy()
-            track.embedding = _normalized_average(
-                track.embedding,
-                embeddings[detection_index],
-            )
+            if embeddings is not None:
+                track.embedding = (
+                    embeddings[detection_index].copy()
+                    if np.linalg.norm(track.embedding) <= 1e-6
+                    else _normalized_average(
+                        track.embedding,
+                        embeddings[detection_index],
+                    )
+                )
             track.score = float(scores[detection_index])
             track.last_frame = frame_index
             used_detections.add(detection_index)
@@ -228,7 +231,11 @@ class HarmonicMeanTracker:
             track = _Track(
                 track_id=self._next_id,
                 bbox=boxes[detection_index].copy(),
-                embedding=embeddings[detection_index].copy(),
+                embedding=(
+                    embeddings[detection_index].copy()
+                    if embeddings is not None
+                    else np.zeros(512, dtype=np.float32)
+                ),
                 score=float(scores[detection_index]),
                 last_frame=frame_index,
             )
@@ -324,8 +331,16 @@ class Rtv4X3DObservationProvider:
         device: str = "cuda:0",
         backend: str = "continual",
         detector_threshold: float = 0.4,
-        court_stride: int = 1,
-        court_imgsz: int = 1280,
+        detector_stride: int = 12,
+        reid_every: int = 6,
+        court_model: str | Path | None = "v1",
+        court_imgsz: int = 640,
+        court_batch_size: int = 1,
+        court_layout_every: int = 10,
+        court_refresh_every: int = 120,
+        court_track_every: int = 4,
+        court_max_hold_frames: int = 30,
+        court_decoder: str = "cuda",
         disable_amp: bool = False,
     ) -> None:
         paths.validate()
@@ -333,8 +348,16 @@ class Rtv4X3DObservationProvider:
         self.device_name = device
         self.backend = backend
         self.detector_threshold = detector_threshold
-        self.court_stride = max(1, court_stride)
+        self.detector_stride = max(1, detector_stride)
+        self.reid_every = max(1, reid_every)
+        self.court_model = court_model
         self.court_imgsz = court_imgsz
+        self.court_batch_size = max(1, court_batch_size)
+        self.court_layout_every = max(1, court_layout_every)
+        self.court_refresh_every = max(self.court_layout_every, court_refresh_every)
+        self.court_track_every = max(1, court_track_every)
+        self.court_max_hold_frames = max(0, court_max_hold_frames)
+        self.court_decoder = court_decoder
         self.disable_amp = disable_amp
         self._torch: Any = None
         self._model: Any = None
@@ -343,8 +366,11 @@ class Rtv4X3DObservationProvider:
         self._input_size = (576, 1024)
         self._use_amp = False
         self._osnet: Any = None
-        self._osnet_transform: Any = None
-        self._court_model: Any = None
+        self._roi_align: Any = None
+        self._detector_frame_tensor: Any = None
+        self._osnet_mean: Any = None
+        self._osnet_std: Any = None
+        self._court_estimator: CourtLineEstimator | None = None
         self._effective_backend = backend
 
     @property
@@ -359,7 +385,11 @@ class Rtv4X3DObservationProvider:
         report: ProgressReporter,
     ) -> InferenceResult:
         """Decode every canonical frame and run actual models against it."""
+        load_started = perf_counter()
         self._load_models(report)
+        load_seconds = perf_counter() - load_started
+        if self._court_estimator is None:
+            raise RuntimeError("court-line estimator was not initialized")
         capture = cv2.VideoCapture(str(clip_path))
         if not capture.isOpened():
             raise ValueError(f"cannot open canonical clip: {clip_path}")
@@ -372,88 +402,80 @@ class Rtv4X3DObservationProvider:
         courts: dict[int, CourtFrame] = {}
         balls: dict[int, BallObservation] = {}
         actions: dict[tuple[int, int], ActionObservation] = {}
+        court_processor = self._court_estimator.begin_video()
+        timings = {
+            "decode_seconds": 0.0,
+            "detector_seconds": 0.0,
+            "postprocess_seconds": 0.0,
+            "embedding_seconds": 0.0,
+            "tracking_seconds": 0.0,
+        }
+        inference_started = perf_counter()
+        last_players: tuple[PlayerObservation, ...] = ()
+        last_ball: BallObservation | None = None
+        last_actions: tuple[ActionObservation, ...] = ()
         frame_index = 0
         try:
             while True:
+                started = perf_counter()
                 ok, frame = capture.read()
+                timings["decode_seconds"] += perf_counter() - started
                 if not ok:
                     break
                 typed_frame = np.asarray(frame, dtype=np.uint8)
-                result = self._infer_detector(typed_frame, width, height)
-                labels, boxes, scores, action_labels, action_scores = self._to_numpy(result)
-                person_indices = np.flatnonzero(
-                    (labels == 0) & (scores >= self.detector_threshold)
-                )
-                person_boxes = boxes[person_indices].astype(np.float32, copy=False)
-                person_scores = scores[person_indices].astype(np.float32, copy=False)
-                embeddings = self._embeddings(typed_frame, person_boxes)
-                tracked = tracker.update(
-                    frame_index,
-                    person_boxes,
-                    person_scores,
-                    embeddings,
-                )
-                frame_players: list[PlayerObservation] = []
-                for item in tracked:
-                    x1, y1, x2, y2 = (float(value) for value in item.bbox)
-                    normalized_bbox = normalize_frame_bbox(
-                        (x1, y1, x2, y2),
+                if frame_index % self.detector_stride == 0:
+                    observed = self._infer_observations(
+                        typed_frame,
+                        frame_index=frame_index,
                         width=width,
                         height=height,
+                        tracker=tracker,
                     )
-                    player = PlayerObservation(
-                        frame_index=frame_index,
-                        source_track_id=item.track_id,
-                        track_id=item.track_id,
-                        frame_bbox=normalized_bbox,
-                        frame_foot_pos=(
-                            _unit_interval((x1 + x2) / (2.0 * width)),
-                            _unit_interval(y2 / height),
-                        ),
-                        court_pos=None,
-                        confidence=item.score,
-                    )
-                    frame_players.append(player)
-                    model_index = int(person_indices[item.detection_index])
-                    if action_labels is not None and model_index < len(action_labels):
-                        action_index = int(action_labels[model_index])
-                        if 0 <= action_index < len(ACTION_NAMES):
-                            confidence = (
-                                float(action_scores[model_index])
-                                if action_scores is not None and model_index < len(action_scores)
+                    last_players = observed.players
+                    last_ball = observed.ball
+                    last_actions = observed.actions
+                    timings["detector_seconds"] += observed.detector_seconds
+                    timings["postprocess_seconds"] += observed.postprocess_seconds
+                    timings["embedding_seconds"] += observed.embedding_seconds
+                    timings["tracking_seconds"] += observed.tracking_seconds
+                else:
+                    gap = frame_index % self.detector_stride
+                    confidence_scale = 0.995**gap
+                    last_players = tuple(
+                        replace(
+                            player,
+                            frame_index=frame_index,
+                            confidence=(
+                                player.confidence * confidence_scale
+                                if player.confidence is not None
                                 else None
-                            )
-                            actions[(frame_index, item.track_id)] = ActionObservation(
-                                frame_index,
-                                item.track_id,
-                                ACTION_NAMES[action_index],
-                                confidence,
-                            )
-                players[frame_index] = tuple(frame_players)
-
-                ball_indices = np.flatnonzero(
-                    (labels == 1) & (scores >= self.detector_threshold)
-                )
-                if len(ball_indices):
-                    ball_index = int(ball_indices[np.argmax(scores[ball_indices])])
-                    ball_box = boxes[ball_index]
-                    balls[frame_index] = BallObservation(
-                        frame_index=frame_index,
-                        frame_pos=(
-                            _unit_interval(
-                                float((ball_box[0] + ball_box[2]) / (2.0 * width))
                             ),
-                            _unit_interval(
-                                float((ball_box[1] + ball_box[3]) / (2.0 * height))
-                            ),
-                        ),
-                        confidence=float(scores[ball_index]),
+                        )
+                        for player in last_players
                     )
+                    last_ball = (
+                        replace(
+                            last_ball,
+                            frame_index=frame_index,
+                            confidence=(
+                                last_ball.confidence * confidence_scale
+                                if last_ball.confidence is not None
+                                else None
+                            ),
+                        )
+                        if last_ball is not None
+                        else None
+                    )
+                    last_actions = tuple(
+                        replace(action, frame_index=frame_index) for action in last_actions
+                    )
+                players[frame_index] = last_players
+                if last_ball is not None:
+                    balls[frame_index] = last_ball
+                for action in last_actions:
+                    actions[(frame_index, action.track_id)] = action
 
-                if frame_index % self.court_stride == 0:
-                    court = self._infer_court(typed_frame, frame_index)
-                    if court is not None:
-                        courts[frame_index] = court
+                courts.update(court_processor.submit(frame_index, typed_frame))
                 frame_index += 1
                 if frame_index % max(1, round(fps)) == 0:
                     report(
@@ -462,6 +484,8 @@ class Rtv4X3DObservationProvider:
                     )
         finally:
             capture.release()
+        courts.update(court_processor.finish())
+        inference_seconds = perf_counter() - inference_started
         if frame_index != expected_frames:
             raise ValueError(
                 f"decoded frame count mismatch: job={expected_frames}, decoded={frame_index}"
@@ -478,10 +502,21 @@ class Rtv4X3DObservationProvider:
             metadata={
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
+                "detector_stride": self.detector_stride,
+                "reid_every": self.reid_every,
                 "tracker": "harmonic-mean-eiou+OSNet+court-reentry",
-                "court_detector": "YOLO26-pose",
+                "court_detector": "court-line-yolo26n-v3+pose36-layout-tracker",
+                "court_model": self._court_estimator.model_name,
                 "streaming_backend": self._effective_backend,
                 "source": "canonical_clip_inference",
+                "timing": {
+                    "model_load_seconds": load_seconds,
+                    "clip_inference_seconds": inference_seconds,
+                    "source_fps": fps,
+                    "effective_fps": frame_index / max(inference_seconds, 1e-9),
+                    **timings,
+                    "court": court_processor.timing.to_mapping(),
+                },
             },
         )
 
@@ -497,7 +532,6 @@ class Rtv4X3DObservationProvider:
         if root not in sys.path:
             sys.path.insert(0, root)
         torch = importlib.import_module("torch")
-        functional = importlib.import_module("torch.nn.functional")
         yaml_module = importlib.import_module("engine.core")
         streaming_module = importlib.import_module("engine.backbone.x3d_streaming")
         yaml_config = yaml_module.YAMLConfig(str(self.paths.rtv4_config))
@@ -522,9 +556,7 @@ class Rtv4X3DObservationProvider:
             )
         )
         self._use_amp = (
-            bool(stream_config.get("amp", True))
-            and device.type == "cuda"
-            and not self.disable_amp
+            bool(stream_config.get("amp", True)) and device.type == "cuda" and not self.disable_amp
         )
         streamer = self._build_streamer(
             streaming_module,
@@ -535,7 +567,6 @@ class Rtv4X3DObservationProvider:
             streamer.to(device)
         streamer.clean_state()
         self._torch = torch
-        self._functional = functional
         self._device = device
         self._model = model
         self._postprocessor = postprocessor
@@ -551,11 +582,48 @@ class Rtv4X3DObservationProvider:
             device,
             checkpoint=str(self.paths.osnet_checkpoint),
         )
-        self._osnet_transform = osnet_module.TRANSFORM
+        self._roi_align = importlib.import_module("torchvision.ops").roi_align
+        self._osnet_mean = torch.tensor(
+            [0.485, 0.456, 0.406], device=device, dtype=torch.float32
+        ).view(1, 3, 1, 1)
+        self._osnet_std = torch.tensor(
+            [0.229, 0.224, 0.225], device=device, dtype=torch.float32
+        ).view(1, 3, 1, 1)
 
-        report(0.055, "loading_court_keypose")
-        yolo = importlib.import_module("ultralytics").YOLO
-        self._court_model = yolo(str(self.paths.court_checkpoint))
+        report(0.055, "loading_court_lines")
+        self._court_estimator = CourtLineEstimator(
+            self.court_model,
+            device=self.device_name,
+            image_size=self.court_imgsz,
+            decoder=self.court_decoder,
+            batch_size=self.court_batch_size,
+            layout_every=self.court_layout_every,
+            refresh_every=self.court_refresh_every,
+            track_every=self.court_track_every,
+            max_hold_frames=self.court_max_hold_frames,
+        )
+        self._court_estimator.warmup()
+        report(0.07, "warming_detector_and_reid")
+        self._warmup_detector(frame_num=frame_num)
+
+    def _warmup_detector(self, *, frame_num: int) -> None:
+        """Compile detector, ROIAlign and OSNet kernels outside job timing."""
+        dummy = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        result = None
+        for _ in range(max(1, frame_num)):
+            result = self._infer_detector(dummy, 1920, 1080)
+        self._to_numpy(result)
+        self._embeddings(
+            dummy,
+            np.asarray(
+                [[160.0, 160.0, 360.0, 720.0], [960.0, 180.0, 1180.0, 760.0]],
+                dtype=np.float32,
+            ),
+        )
+        if self._device.type == "cuda":
+            self._torch.cuda.synchronize(self._device)
+        self._streamer.clean_state()
+        self._detector_frame_tensor = None
 
     @staticmethod
     def _checkpoint_state(checkpoint: Any) -> Any:
@@ -599,27 +667,130 @@ class Rtv4X3DObservationProvider:
                 frame_num=frame_num,
             )
 
+    def _infer_observations(
+        self,
+        frame: NDArray[np.uint8],
+        *,
+        frame_index: int,
+        width: int,
+        height: int,
+        tracker: HarmonicMeanTracker,
+    ) -> _DetectorObservations:
+        """Run one sparse detector step and return normalized observations."""
+        started = perf_counter()
+        result = self._infer_detector(frame, width, height)
+        detector_seconds = perf_counter() - started
+        started = perf_counter()
+        labels, boxes, scores, action_labels, action_scores = self._to_numpy(result)
+        postprocess_seconds = perf_counter() - started
+        person_indices = np.flatnonzero((labels == 0) & (scores >= self.detector_threshold))
+        person_boxes = boxes[person_indices].astype(np.float32, copy=False)
+        person_scores = scores[person_indices].astype(np.float32, copy=False)
+        should_embed = (frame_index // self.detector_stride) % self.reid_every == 0
+        if should_embed:
+            started = perf_counter()
+            embeddings = self._embeddings(frame, person_boxes)
+            embedding_seconds = perf_counter() - started
+        else:
+            embeddings = None
+            embedding_seconds = 0.0
+        started = perf_counter()
+        tracked = tracker.update(
+            frame_index,
+            person_boxes,
+            person_scores,
+            embeddings,
+        )
+        tracking_seconds = perf_counter() - started
+
+        players: list[PlayerObservation] = []
+        actions: list[ActionObservation] = []
+        for item in tracked:
+            x1, y1, x2, y2 = (float(value) for value in item.bbox)
+            players.append(
+                PlayerObservation(
+                    frame_index=frame_index,
+                    source_track_id=item.track_id,
+                    track_id=item.track_id,
+                    frame_bbox=normalize_frame_bbox(
+                        (x1, y1, x2, y2),
+                        width=width,
+                        height=height,
+                    ),
+                    frame_foot_pos=(
+                        _unit_interval((x1 + x2) / (2.0 * width)),
+                        _unit_interval(y2 / height),
+                    ),
+                    court_pos=None,
+                    confidence=item.score,
+                )
+            )
+            model_index = int(person_indices[item.detection_index])
+            if action_labels is None or model_index >= len(action_labels):
+                continue
+            action_index = int(action_labels[model_index])
+            if not 0 <= action_index < len(ACTION_NAMES):
+                continue
+            confidence = (
+                float(action_scores[model_index])
+                if action_scores is not None and model_index < len(action_scores)
+                else None
+            )
+            actions.append(
+                ActionObservation(
+                    frame_index,
+                    item.track_id,
+                    ACTION_NAMES[action_index],
+                    confidence,
+                )
+            )
+
+        ball = None
+        ball_indices = np.flatnonzero((labels == 1) & (scores >= self.detector_threshold))
+        if len(ball_indices):
+            ball_index = int(ball_indices[np.argmax(scores[ball_indices])])
+            ball_box = boxes[ball_index]
+            ball = BallObservation(
+                frame_index=frame_index,
+                frame_pos=(
+                    _unit_interval(float((ball_box[0] + ball_box[2]) / (2.0 * width))),
+                    _unit_interval(float((ball_box[1] + ball_box[3]) / (2.0 * height))),
+                ),
+                confidence=float(scores[ball_index]),
+            )
+        return _DetectorObservations(
+            players=tuple(players),
+            ball=ball,
+            actions=tuple(actions),
+            detector_seconds=detector_seconds,
+            postprocess_seconds=postprocess_seconds,
+            embedding_seconds=embedding_seconds,
+            tracking_seconds=tracking_seconds,
+        )
+
     def _infer_detector(self, frame: NDArray[np.uint8], width: int, height: int) -> Any:
         torch = self._torch
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        input_height, input_width = self._input_size
+        if rgb.shape[:2] != self._input_size:
+            rgb = cv2.resize(rgb, (input_width, input_height), interpolation=cv2.INTER_LINEAR)
+        dtype = torch.float16 if self._use_amp else torch.float32
         tensor = (
             torch.from_numpy(rgb)
             .permute(2, 0, 1)
             .contiguous()
-            .float()
-            .div_(255.0)
             .unsqueeze(0)
+            .to(device=self._device, dtype=dtype, non_blocking=True)
+            .div_(255.0)
         )
-        tensor = self._functional.interpolate(
-            tensor,
-            size=self._input_size,
-            mode="bilinear",
-            align_corners=False,
-        ).to(self._device, non_blocking=True)
-        with torch.inference_mode(), torch.autocast(
-            device_type=self._device.type,
-            dtype=torch.float16,
-            enabled=self._use_amp,
+        self._detector_frame_tensor = tensor
+        with (
+            torch.inference_mode(),
+            torch.autocast(
+                device_type=self._device.type,
+                dtype=torch.float16,
+                enabled=self._use_amp,
+            ),
         ):
             features = self._streamer.forward_step(tensor)
             if features is None:
@@ -678,67 +849,38 @@ class Rtv4X3DObservationProvider:
     ) -> NDArray[np.float32]:
         if not len(boxes):
             return np.empty((0, 512), dtype=np.float32)
-        image_module: Any = importlib.import_module("PIL.Image")
-        pil_image: Any = image_module.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        crops: list[Any] = []
         height = int(frame.shape[0])
         width = int(frame.shape[1])
-        for box in boxes:
-            x1 = max(0, min(width - 1, math.floor(float(box[0]))))
-            y1 = max(0, min(height - 1, math.floor(float(box[1]))))
-            x2 = max(x1 + 1, min(width, math.ceil(float(box[2]))))
-            y2 = max(y1 + 1, min(height, math.ceil(float(box[3]))))
-            crops.append(self._osnet_transform(pil_image.crop((x1, y1, x2, y2)).convert("RGB")))
-        batch = self._torch.stack(crops).to(self._device)
-        with self._torch.inference_mode():
+        input_height, input_width = self._input_size
+        scaled = boxes.astype(np.float32, copy=True)
+        scaled[:, (0, 2)] = np.clip(scaled[:, (0, 2)], 0.0, float(width)) * (input_width / width)
+        scaled[:, (1, 3)] = np.clip(scaled[:, (1, 3)], 0.0, float(height)) * (input_height / height)
+        rois = np.concatenate(
+            (np.zeros((len(scaled), 1), dtype=np.float32), scaled),
+            axis=1,
+        )
+        roi_tensor = self._torch.from_numpy(rois).to(self._device, non_blocking=True)
+        with (
+            self._torch.inference_mode(),
+            self._torch.autocast(
+                device_type=self._device.type,
+                dtype=self._torch.float16,
+                enabled=self._use_amp,
+            ),
+        ):
+            crops = self._roi_align(
+                self._detector_frame_tensor,
+                roi_tensor,
+                output_size=(256, 128),
+                spatial_scale=1.0,
+                sampling_ratio=2,
+                aligned=True,
+            ).float()
+            batch = (crops - self._osnet_mean) / self._osnet_std
             features = self._osnet(batch)
         array = np.asarray(features.detach().cpu().numpy(), dtype=np.float32)
         norms = np.maximum(np.linalg.norm(array, axis=1, keepdims=True), 1e-6)
         return np.asarray(array / norms, dtype=np.float32)
-
-    def _infer_court(
-        self,
-        frame: NDArray[np.uint8],
-        frame_index: int,
-    ) -> CourtFrame | None:
-        results = self._court_model.predict(
-            source=frame,
-            imgsz=self.court_imgsz,
-            device=self.device_name,
-            conf=0.25,
-            verbose=False,
-            save=False,
-        )
-        if not results:
-            return None
-        result = results[0]
-        if result.boxes is None or result.keypoints is None or len(result.boxes) == 0:
-            return None
-        scores = result.boxes.conf.detach().cpu().numpy().reshape(-1)
-        best = int(np.argmax(scores))
-        positions = result.keypoints.xy[best].detach().cpu().numpy()
-        confidences = (
-            result.keypoints.conf[best].detach().cpu().numpy()
-            if result.keypoints.conf is not None
-            else np.ones(len(positions), dtype=np.float32)
-        )
-        keypoints = tuple(
-            CourtKeypoint(
-                index=index,
-                frame_pos_px=(float(position[0]), float(position[1])),
-                confidence=float(confidences[index]),
-                world_pos_m=(
-                    COURT_WORLD_POINTS[index] if index < len(COURT_WORLD_POINTS) else None
-                ),
-            )
-            for index, position in enumerate(positions)
-        )
-        court = CourtFrame(frame_index=frame_index, available=True, keypoints=keypoints)
-        # Keep false positive keypoint clouds from close-ups and replay shots out
-        # of both projection and visualization. The downstream geometry contract
-        # already requires six RANSAC-consistent base points, so rejecting here
-        # does not discard a court that the pipeline could otherwise use.
-        return court if estimate_homography(court) is not None else None
 
     @staticmethod
     def _install_cython_bbox_fallback() -> None:

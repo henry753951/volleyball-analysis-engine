@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory = $true)][string]$Job,
     [string]$Output = "outputs/local-run",
     [string]$Keypoints = "",
-    [switch]$SkipClipVerification
+    [switch]$SkipClipVerification,
+    [switch]$Prewarm,
+    [switch]$NoDebugArtifacts
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +17,12 @@ if ($Keypoints) {
 }
 if ($SkipClipVerification) {
     $arguments += "--skip-clip-verification"
+}
+if ($Prewarm) {
+    $arguments += "--prewarm"
+}
+if ($NoDebugArtifacts) {
+    $arguments += "--no-debug-artifacts"
 }
 Push-Location $projectRoot
 try {

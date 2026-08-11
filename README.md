@@ -8,7 +8,7 @@ canonical clip
 → RT-DETRv4 + streaming X3D person/ball/action inference
 → OSNet appearance embeddings
 → harmonic-mean EIoU tracking with a retained lost pool
-→ YOLO court-keypoint pose + RANSAC homography
+→ volley-court-lines dense line inference + stable 36-point layout tracking
 → same-side 2D-court re-entry identity merge (maximum six identities per side)
 → ball-trajectory contact proposal detection between human service/end boundaries
 → contact-to-player association
@@ -42,10 +42,11 @@ The defaults point at the assets supplied for this project:
 .\scripts\setup-dev.ps1
 ```
 
-This extracts `E:\User\Downloads\volleyball_ball_action.zip`, copies `best_stg1.pth` and the
-`orderfix` court-keypoint model, installs CUDA 13.0 PyTorch and model dependencies with `uv`, then
-runs the environment doctor and strictly loads both checkpoints. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to
-replace an earlier extraction.
+This extracts `E:\User\Downloads\volleyball_ball_action.zip`, copies `best_stg1.pth`, installs
+CUDA 13.0 PyTorch and model dependencies with `uv`, downloads the checksum-verified
+`volley-court-lines` v1 model on first use, then runs the environment doctor and strictly loads
+both model stacks. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to replace an
+earlier extraction.
 
 The default X3D temporal backend is the exact rolling-window implementation supplied with the
 model. `continual-inference` 1.2.4 cannot convert PyTorchVideo's `ResNetBasicStem`; selecting
@@ -72,6 +73,27 @@ optional standalone key-point JSON list can replace `job.key_points` for manual 
   -Clip "H:\Repos\volleyball-ai-contract-lab\.data\exports\8469a80e-c0f5-4a57-8859-c8371de7c755\clip.mp4" `
   -Output ".\outputs\sample"
 ```
+
+For a latency benchmark that omits developer-only image/video rendering while preserving the full
+typed result and VOV1 overlay, add `-Prewarm -NoDebugArtifacts`. The generated `benchmark.json`
+separates model warmup from job wall time and reports effective FPS and real-time factor.
+
+### Local RTX 5070 benchmark
+
+Measured on 2026-08-12 with the checked-in defaults and the 884-frame, 59.737 FPS `clip.mp4`
+(14.798 seconds):
+
+| Path | Job wall time | Effective FPS | Real-time factor |
+| --- | ---: | ---: | ---: |
+| Production result + VOV1 overlay | 12.398 s | 71.30 | 1.194x |
+| Developer 1920x1080 preview package | 48.441 s | 18.25 | 0.305x |
+
+Model warmup is intentionally outside job wall time because the online worker completes it before
+registering. The production path is faster than the source duration; developer preview rendering
+is not. Its dominant cost is CPU-side 1080p panel composition, so online workers disable it by
+default. The preview's final H.264/AAC web encode uses NVENC when available and falls back to
+libx264. RT-DETR runs every 12 source frames and OSNet runs every sixth detector update; carried
+observations keep the typed output frame-complete between model updates.
 
 Output:
 
@@ -132,6 +154,11 @@ use port `4000` when the central server itself runs directly on the host.
 The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
+
+Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
+preview rendering by default; download, analysis, and completion durations are logged separately.
+RT-DETR runs at a configurable cadence while tracking and the wire contract remain frame-complete.
+The court layout is refreshed by the model and advanced between refreshes with optical flow.
 
 For the local Docker Compose central server, create a managed Worker Token and start the worker in
 one command. The token is passed only through the child-process environment and is not written to

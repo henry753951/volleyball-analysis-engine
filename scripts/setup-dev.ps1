@@ -2,7 +2,6 @@
 param(
     [string]$Rtv4Archive = "E:\User\Downloads\volleyball_ball_action.zip",
     [string]$Rtv4Checkpoint = "E:\User\Downloads\best_stg1.pth",
-    [string]$CourtCheckpoint = "H:\Repos\volley-ai\training\runs\yolo26n_volleyball_court_orderfix\weights\best.pt",
     [ValidateSet("cu130", "cpu")]
     [string]$TorchBackend = "cu130",
     [switch]$RefreshAssets
@@ -14,7 +13,7 @@ $artifactRoot = Join-Path $projectRoot ".artifacts"
 $rtv4Target = Join-Path $artifactRoot "rtv4"
 $modelTarget = Join-Path $artifactRoot "models"
 
-foreach ($required in @($Rtv4Archive, $Rtv4Checkpoint, $CourtCheckpoint)) {
+foreach ($required in @($Rtv4Archive, $Rtv4Checkpoint)) {
     if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
         throw "Required asset not found: $required"
     }
@@ -48,7 +47,6 @@ function Copy-ModelAsset {
 }
 
 Copy-ModelAsset -Source $Rtv4Checkpoint -Destination (Join-Path $modelTarget "best_stg1.pth")
-Copy-ModelAsset -Source $CourtCheckpoint -Destination (Join-Path $modelTarget "court-keypoints.pt")
 
 Push-Location $projectRoot
 try {

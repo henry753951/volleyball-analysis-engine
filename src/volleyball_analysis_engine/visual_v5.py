@@ -966,11 +966,11 @@ def _terminal_ball_court(
     return (float(court["x"]), float(court["y"])) if court else None
 
 
-def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
+def _encode_web_video(video_only: Path, original: Path, output: Path) -> str:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg is required to create the visual-v5 package")
-    command = [
+    common = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -984,12 +984,8 @@ def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
         "0:v:0",
         "-map",
         "1:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "20",
+    ]
+    web_options = [
         "-pix_fmt",
         "yuv420p",
         "-profile:v",
@@ -1005,13 +1001,29 @@ def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
         "-movflags",
         "+faststart",
         "-shortest",
-        str(output),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
+    encoders = (
+        (
+            "h264_nvenc",
+            ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0"],
+        ),
+        ("libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]),
+    )
+    failures: list[str] = []
+    for name, encoder_options in encoders:
         output.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg visual-v5 encode failed: {completed.stderr.strip()}")
-    video_only.unlink(missing_ok=True)
+        completed = subprocess.run(
+            [*common, *encoder_options, *web_options, str(output)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            video_only.unlink(missing_ok=True)
+            return name
+        failures.append(f"{name}: {completed.stderr.strip()}")
+    output.unlink(missing_ok=True)
+    raise RuntimeError("ffmpeg visual-v5 encode failed: " + " | ".join(failures))
 
 
 def _render_video(
@@ -1131,7 +1143,7 @@ def _render_video(
     if frame_index != total_frames:
         video_only.unlink(missing_ok=True)
         raise ValueError(f"decoded {frame_index} frames but AI job declares {total_frames}")
-    _encode_web_video(video_only, clip_path, output_path)
+    video_encoder = _encode_web_video(video_only, clip_path, output_path)
     return {
         "width": OUTPUT_WIDTH,
         "height": OUTPUT_HEIGHT,
@@ -1139,6 +1151,7 @@ def _render_video(
         "frames_written": frame_index,
         "audio_preserved": bool(job["clip"]["video"]["has_audio"]),
         "video_codec": "h264",
+        "video_encoder": video_encoder,
         "pixel_format": "yuv420p",
         "faststart": True,
         "layout": "match_1280x720_plus_info_and_bottom_canonical_court",

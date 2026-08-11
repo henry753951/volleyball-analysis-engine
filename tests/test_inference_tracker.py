@@ -44,6 +44,24 @@ def test_tracker_uses_appearance_when_detection_order_changes() -> None:
     assert second_by_detection[0] == first_by_detection[1]
 
 
+def test_tracker_keeps_identity_between_sparse_reid_frames() -> None:
+    tracker = HarmonicMeanTracker(match_threshold=0.2)
+    boxes = np.asarray(
+        [[10.0, 10.0, 30.0, 60.0], [80.0, 10.0, 100.0, 60.0]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    embeddings = np.zeros((2, 512), dtype=np.float32)
+    embeddings[0, 0] = 1.0
+    embeddings[1, 1] = 1.0
+    first = tracker.update(0, boxes, scores, embeddings)
+
+    shifted = boxes + np.asarray([2.0, 0.0, 2.0, 0.0], dtype=np.float32)
+    second = tracker.update(12, shifted, scores, None)
+
+    assert [item.track_id for item in second] == [item.track_id for item in first]
+
+
 def test_detector_bbox_overshoot_is_clamped_to_video_coordinates() -> None:
     assert normalize_frame_bbox(
         (-4.75, 20.0, 1924.5, 1083.0),

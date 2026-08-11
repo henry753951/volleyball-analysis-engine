@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -21,26 +22,29 @@ class Settings(BaseSettings):
     server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.4.1+court-canonical-v4"
+    provider_build_id: str = "volleyball-analysis-engine/0.5.0+court-lines-v1"
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"
     rtv4_backend: str = "rolling"
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
-    court_stride: int = Field(default=1, ge=1, le=600)
-    court_imgsz: int = Field(default=1280, ge=320, le=2048)
+    detector_stride: int = Field(default=12, ge=1, le=30)
+    reid_every: int = Field(default=6, ge=1, le=30)
+    court_model: str = "v1"
+    court_imgsz: int = Field(default=640, ge=320, le=2048)
+    court_batch_size: int = Field(default=1, ge=1, le=64)
+    court_layout_every: int = Field(default=10, ge=1, le=600)
+    court_refresh_every: int = Field(default=120, ge=1, le=600)
+    court_track_every: int = Field(default=4, ge=1, le=30)
+    court_max_hold_frames: int = Field(default=30, ge=0, le=600)
+    court_decoder: Literal["auto", "spatial", "cuda"] = "cuda"
+    prewarm_models: bool = True
+    write_debug_artifacts: bool = False
     disable_amp: bool = False
     rtv4_root: Path = Path(".artifacts/rtv4")
-    rtv4_config: Path = Path(
-        ".artifacts/rtv4/configs/rtv4/rtv4_x3d_volleyball_v4a_decoupled.yml"
-    )
+    rtv4_config: Path = Path(".artifacts/rtv4/configs/rtv4/rtv4_x3d_volleyball_v4a_decoupled.yml")
     rtv4_checkpoint: Path = Path(".artifacts/models/best_stg1.pth")
-    court_checkpoint: Path = Path(
-        ".artifacts/models/court-keypoints-video91-canonical-v4.pt"
-    )
-    smp_root: Path = Path(
-        "../volley-ai/upstream/selective-mask-propagation"
-    )
+    smp_root: Path = Path("../volley-ai/upstream/selective-mask-propagation")
     osnet_checkpoint: Path = Path(
         "../volley-ai/upstream/selective-mask-propagation/"
         "selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60"

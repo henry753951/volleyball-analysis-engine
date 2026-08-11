@@ -5,20 +5,21 @@ param(
     [Alias("WorkerId")]
     [string]$InstanceKey = "analysis-worker-local",
     [int]$Concurrency = 1,
-    [string]$CourtCheckpoint = ".artifacts/models/court-keypoints-video91-canonical-v4.pt",
-    [int]$CourtStride = 1,
-    [int]$CourtImageSize = 1280
+    [int]$DetectorStride = 12,
+    [int]$ReIdEvery = 6,
+    [string]$CourtModel = "v1",
+    [int]$CourtImageSize = 640
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$checkpoint = (Resolve-Path (Join-Path $projectRoot $CourtCheckpoint)).Path
 $env:VOLLYAI_SERVER_WS_URL = $CentralUrl
 $env:VOLLYAI_TOKEN = $Token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
-$env:VOLLYAI_COURT_CHECKPOINT = $checkpoint
-$env:VOLLYAI_COURT_STRIDE = [string]$CourtStride
+$env:VOLLYAI_DETECTOR_STRIDE = [string]$DetectorStride
+$env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
+$env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
 Push-Location $projectRoot
 try {

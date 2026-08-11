@@ -2,17 +2,17 @@
 param(
     [string]$CentralHttpUrl = "http://localhost:10000",
     [string]$CentralWsUrl = "ws://localhost:10000/api/v1/ai/providers/ws",
-    [string]$InstanceKey = "analysis-worker-rtx5070-court36",
-    [string]$TokenName = "local-rtx5070-court36",
-    [string]$CourtCheckpoint = ".artifacts/models/court-keypoints-video91-canonical-v4.pt",
-    [int]$CourtStride = 1,
-    [int]$CourtImageSize = 1280,
+    [string]$InstanceKey = "analysis-worker-rtx5070-court-lines",
+    [string]$TokenName = "local-rtx5070-court-lines",
+    [int]$DetectorStride = 12,
+    [int]$ReIdEvery = 6,
+    [string]$CourtModel = "v1",
+    [int]$CourtImageSize = 640,
     [int]$Concurrency = 1
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$checkpoint = (Resolve-Path (Join-Path $projectRoot $CourtCheckpoint)).Path
 $workerExecutable = Join-Path $projectRoot ".venv\Scripts\volleyball-analysis-worker.exe"
 if (-not (Test-Path -LiteralPath $workerExecutable)) {
     throw "Worker executable is missing: $workerExecutable"
@@ -35,8 +35,9 @@ $env:VOLLYAI_SERVER_WS_URL = $CentralWsUrl
 $env:VOLLYAI_TOKEN = $created.token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
-$env:VOLLYAI_COURT_CHECKPOINT = $checkpoint
-$env:VOLLYAI_COURT_STRIDE = [string]$CourtStride
+$env:VOLLYAI_DETECTOR_STRIDE = [string]$DetectorStride
+$env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
+$env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
 $env:VOLLYAI_WORKSPACE = Join-Path $projectRoot ".artifacts\workspaces"
 

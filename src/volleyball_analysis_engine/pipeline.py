@@ -78,6 +78,12 @@ class AnalysisPipeline:
         self.provider = provider
         self.config = config or PipelineConfig()
 
+    def prepare(self, report: ProgressReporter | None = None) -> None:
+        """Load persistent model state before accepting a worker lease."""
+        prepare = getattr(self.provider, "prepare", None)
+        if callable(prepare):
+            prepare(report or _noop_progress)
+
     def analyze(
         self,
         job: AIJobRequest,
@@ -161,7 +167,7 @@ class AnalysisPipeline:
                 },
                 "extensions": {
                     "inference_source": "canonical_clip",
-                    "court_detection": "YOLO26-pose+ransac-homography",
+                    "court_detection": "court-line-yolo26n-v3+pose36-layout-tracker",
                     "tracking": "harmonic-mean-eiou+OSNet",
                     "reid": "nearest-reentry-in-unclamped-2d-court-space",
                     "action_source": "RT-DETRv4-X3D",
@@ -389,11 +395,7 @@ class AnalysisPipeline:
         for index, spec in enumerate(specs):
             anchor = spec.anchor
             previous_anchor = specs[index - 1].anchor if index > 0 else -1
-            next_anchor = (
-                specs[index + 1].anchor
-                if index + 1 < len(specs)
-                else total_frames
-            )
+            next_anchor = specs[index + 1].anchor if index + 1 < len(specs) else total_frames
             association = associate_hit(
                 anchor_frame=anchor,
                 previous_anchor_frame=previous_anchor,

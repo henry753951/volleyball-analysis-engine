@@ -4,8 +4,8 @@ param(
     [string]$CentralWsUrl = "ws://localhost:10000/api/v1/ai/providers/ws",
     [string]$InstanceKey = "analysis-worker-rtx5070-court-lines",
     [string]$TokenName = "local-rtx5070-court-lines",
-    [int]$DetectorStride = 12,
-    [int]$ReIdEvery = 6,
+    [int]$DetectorStride = 1,
+    [int]$ReIdEvery = 1,
     [string]$CourtModel = "v1",
     [int]$CourtImageSize = 640,
     [int]$Concurrency = 1

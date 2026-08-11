@@ -1000,7 +1000,6 @@ def _encode_web_video(video_only: Path, original: Path, output: Path) -> str:
         "192k",
         "-movflags",
         "+faststart",
-        "-shortest",
     ]
     encoders = (
         (

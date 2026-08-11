@@ -80,20 +80,24 @@ separates model warmup from job wall time and reports effective FPS and real-tim
 
 ### Local RTX 5070 benchmark
 
-Measured on 2026-08-12 with the checked-in defaults and the 884-frame, 59.737 FPS `clip.mp4`
-(14.798 seconds):
+The checked-in quality profile performs fresh player, ball, action, ReID, and court-line model
+inference on every source frame. Court identity/layout matching runs until a layout is accepted,
+then refreshes every 120 frames; optical flow advances the accepted geometry against every
+intermediate source frame. Model warmup is intentionally outside job wall time because the online
+worker completes it before registering. Developer preview rendering is disabled online by default;
+its final H.264/AAC web encode uses NVENC when available and falls back to libx264.
+
+Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds):
 
 | Path | Job wall time | Effective FPS | Real-time factor |
 | --- | ---: | ---: | ---: |
-| Production result + VOV1 overlay | 12.398 s | 71.30 | 1.194x |
-| Developer 1920x1080 preview package | 48.441 s | 18.25 | 0.305x |
+| Every-frame result + VOV1 overlay | 79.071 s | 11.18 | 0.187x |
+| Every-frame 1920x1080 preview package | 118.224 s | 7.48 | 0.125x |
 
-Model warmup is intentionally outside job wall time because the online worker completes it before
-registering. The production path is faster than the source duration; developer preview rendering
-is not. Its dominant cost is CPU-side 1080p panel composition, so online workers disable it by
-default. The preview's final H.264/AAC web encode uses NVENC when available and falls back to
-libx264. RT-DETR runs every 12 source frames and OSNet runs every sixth detector update; carried
-observations keep the typed output frame-complete between model updates.
+The current RT-DETRv4/X3D and OSNet stack is not real-time when both models run on all 884 frames.
+The earlier throughput profile that reused detections between sampled frames is intentionally not
+the default. The rendered H.264 stream is also checked to contain all 884 frames; audio ending a
+few milliseconds earlier does not truncate the video stream.
 
 Output:
 

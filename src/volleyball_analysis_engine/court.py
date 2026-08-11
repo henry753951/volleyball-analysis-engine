@@ -1,4 +1,4 @@
-"""Sparse court-line inference with frame-synchronous layout tracking."""
+"""Batched court-line inference with frame-synchronous layout tracking."""
 
 from __future__ import annotations
 
@@ -96,6 +96,7 @@ class CourtLineEstimator:
         """Create isolated temporal state for one clip."""
         return CourtVideoProcessor(
             self._model,
+            batch_size=self.batch_size,
             layout_every=self.layout_every,
             refresh_every=self.refresh_every,
             track_every=self.track_every,
@@ -104,12 +105,13 @@ class CourtLineEstimator:
 
 
 class CourtVideoProcessor:
-    """Run sparse geometry inference while advancing accepted geometry every frame."""
+    """Infer every frame in batches while advancing accepted geometry every frame."""
 
     def __init__(
         self,
         model: CourtLineModel,
         *,
+        batch_size: int,
         layout_every: int,
         refresh_every: int,
         track_every: int,
@@ -117,10 +119,12 @@ class CourtVideoProcessor:
     ) -> None:
         """Initialize isolated buffering and tracking state."""
         self._model = model
+        self._batch_size = max(1, batch_size)
         self._layout_every = layout_every
         self._refresh_every = refresh_every
         self._track_every = track_every
         self._tracker = CourtLayoutTracker(LayoutTrackingConfig(max_hold_frames=max_hold_frames))
+        self._pending: list[tuple[int, NDArray[np.uint8]]] = []
         self.timing = CourtTiming()
 
     def submit(
@@ -130,6 +134,10 @@ class CourtVideoProcessor:
     ) -> dict[int, CourtFrame]:
         """Advance tracking and run fresh geometry only when it is useful."""
         self.timing.source_frames += 1
+        if self._layout_every == 1:
+            self._pending.append((frame_index, frame))
+            return self._flush_pending() if len(self._pending) >= self._batch_size else {}
+
         has_layout = self._tracker.current is not None
         inference_every = self._refresh_every if has_layout else self._layout_every
         should_infer = frame_index % inference_every == 0
@@ -163,8 +171,42 @@ class CourtVideoProcessor:
         return {frame_index: court}
 
     def finish(self) -> dict[int, CourtFrame]:
-        """Return no deferred results; sparse inference is processed online."""
-        return {}
+        """Flush a final partial full-frame batch."""
+        return self._flush_pending()
+
+    def _flush_pending(self) -> dict[int, CourtFrame]:
+        if not self._pending:
+            return {}
+        pending = self._pending
+        self._pending = []
+        frames = [frame for _, frame in pending]
+        started = perf_counter()
+        results = self._model.predict_many(frames, include_layout=False)
+        self.timing.model_seconds += perf_counter() - started
+        self.timing.batches += 1
+        self.timing.inference_frames += len(pending)
+        output: dict[int, CourtFrame] = {}
+        for (frame_index, frame), result in zip(pending, results, strict=True):
+            has_layout = self._tracker.current is not None
+            attach_every = self._refresh_every if has_layout else self._layout_every
+            layout = None
+            if frame_index % attach_every == 0:
+                started = perf_counter()
+                layout = self._model.attach_layout(result).layout
+                self.timing.layout_seconds += perf_counter() - started
+            started = perf_counter()
+            tracked = self._tracker.update(
+                layout,
+                width=int(frame.shape[1]),
+                height=int(frame.shape[0]),
+                frame=frame,
+            )
+            self.timing.tracking_seconds += perf_counter() - started
+            court = self._court_frame(frame_index, tracked)
+            if court is not None:
+                self.timing.accepted_frames += 1
+                output[frame_index] = court
+        return output
 
     @staticmethod
     def _court_frame(frame_index: int, layout: CourtLayout | None) -> CourtFrame | None:

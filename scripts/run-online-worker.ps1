@@ -5,8 +5,8 @@ param(
     [Alias("WorkerId")]
     [string]$InstanceKey = "analysis-worker-local",
     [int]$Concurrency = 1,
-    [int]$DetectorStride = 12,
-    [int]$ReIdEvery = 6,
+    [int]$DetectorStride = 1,
+    [int]$ReIdEvery = 1,
     [string]$CourtModel = "v1",
     [int]$CourtImageSize = 640
 )

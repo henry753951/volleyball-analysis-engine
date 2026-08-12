@@ -316,6 +316,8 @@ class CourtVideoProcessor:
             self._consecutive_match_misses = 0
 
         accepted = candidate if candidate is not None and candidate.status == "ok" else None
+        if accepted is not None and prior is None:
+            self._output_orientation = self._screen_canonical_orientation(accepted)
         if accepted is not None and prior is not None:
             aligned, correction = self._align_orientation(accepted, prior)
             jump = self._layout_jump_px(prior, aligned)
@@ -378,6 +380,33 @@ class CourtVideoProcessor:
         )
         self.timing.tracking_seconds += perf_counter() - started
         return tracked
+
+    @staticmethod
+    def _screen_canonical_orientation(layout: CourtLayout) -> str:
+        """Choose one stable world orientation whose axes follow the video screen."""
+        if len(layout.keypoints) != POSE36_POINT_COUNT:
+            return "identity"
+
+        def orientation_score(name: str) -> float:
+            oriented = CourtVideoProcessor._reorient_layout(layout, name)
+            points = {point.id: point for point in oriented.keypoints}
+            if len(points) != POSE36_POINT_COUNT:
+                return float("-inf")
+            image_width = max(point.x for point in points.values()) - min(
+                point.x for point in points.values()
+            )
+            image_height = max(point.y for point in points.values()) - min(
+                point.y for point in points.values()
+            )
+            world_left_x = float(np.median([points[index].x for index in (0, 9)]))
+            world_right_x = float(np.median([points[index].x for index in (4, 5)]))
+            world_far_y = float(np.median([points[index].y for index in range(5)]))
+            world_near_y = float(np.median([points[index].y for index in range(5, 10)]))
+            return (world_right_x - world_left_x) / max(image_width, 1.0) + (
+                world_near_y - world_far_y
+            ) / max(image_height, 1.0)
+
+        return max(_ORIENTATION_TRANSFORMS, key=orientation_score)
 
     @staticmethod
     def _align_orientation(

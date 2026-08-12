@@ -182,3 +182,34 @@ def test_layout_orientation_lock_corrects_a_both_axis_recovery_flip() -> None:
         (point.x, point.y) for point in reference.keypoints
     ]
     assert corrected.homography == reference.homography
+
+
+def test_initial_layout_is_oriented_like_the_video_screen() -> None:
+    points = tuple(
+        ModelCourtKeypoint(
+            index,
+            20.0 * (18.0 - y) + 100.0,
+            10.0 * x + 50.0,
+            0.9,
+            True,
+            "test",
+        )
+        for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
+    )
+    layout = CourtLayout(
+        status="ok",
+        score=0.9,
+        reason="test",
+        keypoints=points,
+        candidate_keypoints=points,
+        matched_line_count=7,
+        hypothesis_margin=0.5,
+        semantic_alignment=1.0,
+        homography=None,
+    )
+
+    orientation = CourtVideoProcessor._screen_canonical_orientation(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        layout
+    )
+
+    assert orientation == "near_far"

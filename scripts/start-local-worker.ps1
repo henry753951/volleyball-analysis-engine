@@ -4,7 +4,6 @@ param(
     [string]$CentralWsUrl = "ws://localhost:10000/api/v1/ai/providers/ws",
     [string]$InstanceKey = "analysis-worker-rtx5070-court-lines",
     [string]$TokenName = "local-rtx5070-court-lines",
-    [int]$DetectorStride = 1,
     [int]$ReIdEvery = 1,
     [string]$CourtModel = "v1",
     [int]$CourtImageSize = 640,
@@ -35,7 +34,6 @@ $env:VOLLYAI_SERVER_WS_URL = $CentralWsUrl
 $env:VOLLYAI_TOKEN = $created.token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
-$env:VOLLYAI_DETECTOR_STRIDE = [string]$DetectorStride
 $env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
 $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize

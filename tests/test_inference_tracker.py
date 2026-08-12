@@ -79,6 +79,52 @@ def test_tracker_extrapolates_boxes_between_detector_frames() -> None:
     assert prediction[0].bbox[0] > shifted[0, 0]
 
 
+def test_tracker_bridges_short_miss_but_never_renders_long_lost_pool() -> None:
+    tracker = HarmonicMeanTracker(match_threshold=0.2)
+    boxes = np.asarray(
+        [[10.0, 10.0, 30.0, 60.0], [80.0, 10.0, 100.0, 60.0]],
+        dtype=np.float32,
+    )
+    scores = np.asarray([0.9, 0.9], dtype=np.float32)
+    embeddings = np.zeros((2, 512), dtype=np.float32)
+    embeddings[0, 0] = 1.0
+    embeddings[1, 1] = 1.0
+    first = tracker.update(0, boxes, scores, embeddings)
+
+    short_gap = tracker.update(1, boxes[:1], scores[:1], embeddings[:1])
+    tracker.update(2, boxes[:1], scores[:1], embeddings[:1])
+    long_gap = tracker.update(3, boxes[:1], scores[:1], embeddings[:1])
+    predicted = tracker.predict(4)
+
+    assert {item.track_id for item in short_gap} == {item.track_id for item in first}
+    assert [item.track_id for item in long_gap] == [first[0].track_id]
+    assert [item.track_id for item in predicted] == [first[0].track_id]
+
+
+def test_tracker_matches_against_motion_predicted_bbox() -> None:
+    tracker = HarmonicMeanTracker(match_threshold=0.2)
+    scores = np.asarray([0.9], dtype=np.float32)
+    embedding = np.zeros((1, 512), dtype=np.float32)
+    embedding[0, 0] = 1.0
+    first_box = np.asarray([[0.0, 0.0, 10.0, 10.0]], dtype=np.float32)
+    first = tracker.update(0, first_box, scores, embedding)
+    tracker.update(
+        1,
+        np.asarray([[5.0, 0.0, 15.0, 10.0]], dtype=np.float32),
+        scores,
+        embedding,
+    )
+
+    moved = tracker.update(
+        5,
+        np.asarray([[12.0, 0.0, 22.0, 10.0]], dtype=np.float32),
+        scores,
+        None,
+    )
+
+    assert moved[0].track_id == first[0].track_id
+
+
 def test_detector_bbox_overshoot_is_clamped_to_video_coordinates() -> None:
     assert normalize_frame_bbox(
         (-4.75, 20.0, 1924.5, 1083.0),

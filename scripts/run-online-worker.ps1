@@ -5,7 +5,6 @@ param(
     [Alias("WorkerId")]
     [string]$InstanceKey = "analysis-worker-local",
     [int]$Concurrency = 1,
-    [int]$DetectorStride = 1,
     [int]$ReIdEvery = 1,
     [string]$CourtModel = "v1",
     [int]$CourtImageSize = 640
@@ -17,7 +16,6 @@ $env:VOLLYAI_SERVER_WS_URL = $CentralUrl
 $env:VOLLYAI_TOKEN = $Token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
-$env:VOLLYAI_DETECTOR_STRIDE = [string]$DetectorStride
 $env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
 $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize

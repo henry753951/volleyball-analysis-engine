@@ -17,9 +17,9 @@ class _Identity:
 
 
 class CourtPositionReidentifier:
-    """Merge enter/leave fragments into at most six identities per court side."""
+    """Merge nearby enter/leave fragments while showing at most six players per side."""
 
-    def __init__(self, *, max_per_side: int = 6, max_distance: float = 0.35) -> None:
+    def __init__(self, *, max_per_side: int = 6, max_distance: float = 0.12) -> None:
         """Configure the per-side capacity and nearest-position threshold."""
         self.max_per_side = max_per_side
         self.max_distance = max_distance
@@ -32,10 +32,10 @@ class CourtPositionReidentifier:
         output: list[FrameObservation] = []
         for frame in frames:
             selected_players = self._select_side_roster(frame.players)
-            visible_sources = {player.source_track_id for player in selected_players}
+            used_canonical: set[int] = set()
             players = tuple(
-                self._assign(player, frame.frame_index, visible_sources)
-                for player in sorted(selected_players, key=lambda item: item.source_track_id)
+                self._assign(player, frame.frame_index, used_canonical)
+                for player in sorted(selected_players, key=self._assignment_priority)
             )
             output.append(
                 FrameObservation(
@@ -71,36 +71,32 @@ class CourtPositionReidentifier:
         self,
         player: PlayerObservation,
         frame_index: int,
-        visible_sources: set[int],
+        used_canonical: set[int],
     ) -> PlayerObservation:
         known = self._source_to_canonical.get(player.source_track_id)
-        if known is None:
-            known = self._choose_identity(player, frame_index, visible_sources)
+        if known is None or known in used_canonical:
+            known = self._choose_identity(player, frame_index, used_canonical)
             self._source_to_canonical[player.source_track_id] = known
         identity = self._identities[known]
         identity.last_frame = frame_index
         identity.last_court_pos = player.court_pos
+        used_canonical.add(known)
         return player.with_identity(known)
 
     def _choose_identity(
         self,
         player: PlayerObservation,
         frame_index: int,
-        visible_sources: set[int],
+        used_canonical: set[int],
     ) -> int:
         side = player.court_side
-        active_canonical = {
-            canonical
-            for source, canonical in self._source_to_canonical.items()
-            if source in visible_sources
-        }
         side_identities = [
             identity for identity in self._identities.values() if identity.side == side
         ]
         candidates = [
             identity
             for identity in side_identities
-            if identity.track_id not in active_canonical and identity.last_frame < frame_index
+            if identity.track_id not in used_canonical and identity.last_frame < frame_index
         ]
         nearest = min(
             candidates,
@@ -112,9 +108,7 @@ class CourtPositionReidentifier:
             if nearest is None
             else self._distance(player.court_pos, nearest.last_court_pos)
         )
-        if nearest is not None and (
-            nearest_distance <= self.max_distance or len(side_identities) >= self.max_per_side
-        ):
+        if nearest is not None and nearest_distance <= self.max_distance:
             return nearest.track_id
         identity = _Identity(
             track_id=self._next_id,
@@ -125,6 +119,20 @@ class CourtPositionReidentifier:
         self._identities[identity.track_id] = identity
         self._next_id += 1
         return identity.track_id
+
+    def _assignment_priority(self, player: PlayerObservation) -> tuple[bool, float, int]:
+        """Let the visible source nearest its prior canonical position keep that identity."""
+        canonical = self._source_to_canonical.get(player.source_track_id)
+        identity = self._identities.get(canonical) if canonical is not None else None
+        return (
+            identity is None,
+            (
+                float("inf")
+                if identity is None
+                else self._distance(player.court_pos, identity.last_court_pos)
+            ),
+            player.source_track_id,
+        )
 
     @staticmethod
     def _distance(

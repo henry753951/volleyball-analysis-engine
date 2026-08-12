@@ -120,7 +120,6 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         device=settings.device,
         backend=settings.rtv4_backend,
         detector_threshold=settings.detector_threshold,
-        detector_stride=settings.detector_stride,
         detector_input_scale=settings.detector_input_scale,
         reid_every=settings.reid_every,
         court_model=settings.court_model,

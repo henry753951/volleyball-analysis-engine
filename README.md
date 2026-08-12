@@ -92,24 +92,15 @@ Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds
 
 | Path | Job wall time | Effective FPS | Real-time factor |
 | --- | ---: | ---: | ---: |
-| Quality: every model on every frame | 76.657 s | 11.53 | 0.193x |
-| Realtime: detector every 4 frames, ReID every 8 frames, court every frame | 29.017 s | 30.46 | 0.510x |
-| Quality + 1920x1080 preview package | 112.420 s | 7.86 | 0.132x |
+| Every model on every source frame | 73.654 s | 12.00 | 0.201x |
+| Every model + 1920x1080 preview package | 112.747 s | 7.84 | 0.131x |
 
-The realtime profile keeps court inference and identity matching at every source frame. It runs
-RT-DETRv4/X3D every fourth frame, OSNet on every second detector update (every eighth source frame),
-and extrapolates tracked boxes with measured velocity on the intervening frames. Enable it with:
-
-```dotenv
-VOLLYAI_DETECTOR_STRIDE=4
-VOLLYAI_REID_EVERY=2
-VOLLYAI_COURT_BATCH_SIZE=16
-VOLLYAI_COURT_LAYOUT_EVERY=1
-```
-
-The quality profile remains the default because the realtime profile trades detector/action
-temporal detail for throughput. The rendered H.264 stream is checked to contain all 884 frames;
-audio ending a few milliseconds earlier does not truncate the video stream.
+RT-DETRv4/X3D detector cadence is fixed at every source frame and is intentionally not configurable.
+The tracker may bridge an isolated detector miss for at most two frames using measured velocity,
+but its longer ReID recovery pool is never rendered. This prevents stale identities from flashing
+back into the overlay while retaining short-gap continuity. The rendered H.264 stream was checked
+to contain all 884 source frames; audio ending a few milliseconds earlier does not truncate the
+video stream.
 
 Output:
 
@@ -173,9 +164,9 @@ typed result through the authenticated callback.
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.
-RT-DETR runs at a configurable cadence while velocity-aware tracking and the wire contract remain
-frame-complete. Court inference and identity matching run on every source frame by default; a prior
-layout only constrains the current-frame match and never replaces it.
+RT-DETR, court inference, and court identity matching run on every source frame. Velocity-aware
+tracking only bridges an isolated detector miss; a prior court layout only constrains the
+current-frame match and never replaces it.
 
 For the local Docker Compose central server, create a managed Worker Token and start the worker in
 one command. The token is passed only through the child-process environment and is not written to

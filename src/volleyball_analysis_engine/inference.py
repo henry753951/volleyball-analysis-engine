@@ -8,7 +8,7 @@ import logging
 import sys
 import types
 from collections.abc import Callable
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol, cast
@@ -19,6 +19,7 @@ from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment  # pyright: ignore[reportUnknownVariableType]
 from volleyball_monitoring_ai import AIJobRequest
 
+from .ball_tracking import BallTrajectoryTracker
 from .court import CourtLineEstimator, interpolate_short_court_gaps
 from .records import (
     ActionObservation,
@@ -146,18 +147,21 @@ class _DetectorObservations:
 
 
 class HarmonicMeanTracker:
-    """Appearance/EIoU tracker with a bounded keep-all lost pool."""
+    """Motion-aware appearance/EIoU tracker with separate visible and lost state."""
 
     def __init__(
         self,
         *,
         max_lost_frames: int = 120,
+        max_prediction_frames: int = 2,
         match_threshold: float = 0.28,
     ) -> None:
         self.max_lost_frames = max_lost_frames
+        self.max_prediction_frames = max(0, max_prediction_frames)
         self.match_threshold = match_threshold
         self._next_id = 1
         self._tracks: dict[int, _Track] = {}
+        self._visible_track_ids: set[int] = set()
 
     def update(
         self,
@@ -177,7 +181,9 @@ class HarmonicMeanTracker:
         if active and len(boxes):
             similarity = np.zeros((len(active), len(boxes)), dtype=np.float32)
             for row, track in enumerate(active):
-                geometry = _eiou_similarity(track.bbox, boxes)
+                elapsed = max(0, frame_index - track.last_frame)
+                predicted_bbox = track.bbox + track.velocity * elapsed
+                geometry = _eiou_similarity(predicted_bbox, boxes)
                 if embeddings is None or np.linalg.norm(track.embedding) <= 1e-6:
                     similarity[row] = geometry
                 else:
@@ -200,8 +206,10 @@ class HarmonicMeanTracker:
                 if float(similarity[row, column]) >= self.match_threshold
             ]
 
+        previously_visible = self._visible_track_ids
         used_detections: set[int] = set()
         output: list[_TrackedDetection] = []
+        visible_track_ids: set[int] = set()
         for row, detection_index in matches:
             track = active[row]
             elapsed = max(1, frame_index - track.last_frame)
@@ -220,6 +228,7 @@ class HarmonicMeanTracker:
             track.score = float(scores[detection_index])
             track.last_frame = frame_index
             used_detections.add(detection_index)
+            visible_track_ids.add(track.track_id)
             output.append(
                 _TrackedDetection(
                     track.track_id,
@@ -245,6 +254,7 @@ class HarmonicMeanTracker:
                 velocity=np.zeros(4, dtype=np.float32),
             )
             self._tracks[track.track_id] = track
+            visible_track_ids.add(track.track_id)
             self._next_id += 1
             output.append(
                 _TrackedDetection(
@@ -254,14 +264,34 @@ class HarmonicMeanTracker:
                     track.score,
                 )
             )
+        for track_id in previously_visible - visible_track_ids:
+            track = self._tracks.get(track_id)
+            if track is None:
+                continue
+            elapsed = frame_index - track.last_frame
+            if elapsed <= 0 or elapsed > self.max_prediction_frames:
+                continue
+            visible_track_ids.add(track_id)
+            output.append(
+                _TrackedDetection(
+                    track_id,
+                    -1,
+                    track.bbox + track.velocity * elapsed,
+                    track.score * (0.98**elapsed),
+                )
+            )
+        self._visible_track_ids = visible_track_ids
         return output
 
     def predict(self, frame_index: int) -> list[_TrackedDetection]:
         """Extrapolate active boxes between detector frames without changing identity state."""
         output: list[_TrackedDetection] = []
-        for track in self._tracks.values():
+        for track_id in self._visible_track_ids:
+            track = self._tracks.get(track_id)
+            if track is None:
+                continue
             elapsed = frame_index - track.last_frame
-            if elapsed <= 0 or elapsed > self.max_lost_frames:
+            if elapsed <= 0 or elapsed > self.max_prediction_frames:
                 continue
             output.append(
                 _TrackedDetection(
@@ -353,7 +383,6 @@ class Rtv4X3DObservationProvider:
         device: str = "cuda:0",
         backend: str = "continual",
         detector_threshold: float = 0.4,
-        detector_stride: int = 1,
         detector_input_scale: float = 1.0,
         reid_every: int = 1,
         court_model: str | Path | None = "v1",
@@ -371,7 +400,6 @@ class Rtv4X3DObservationProvider:
         self.device_name = device
         self.backend = backend
         self.detector_threshold = detector_threshold
-        self.detector_stride = max(1, detector_stride)
         self.detector_input_scale = min(1.0, max(0.5, detector_input_scale))
         self.reid_every = max(1, reid_every)
         self.court_model = court_model
@@ -422,6 +450,7 @@ class Rtv4X3DObservationProvider:
         fps = float(capture.get(cv2.CAP_PROP_FPS))
         expected_frames = int(job.clip.video.total_frames)
         tracker = HarmonicMeanTracker(max_lost_frames=max(60, round(fps * 2.0)))
+        ball_tracker = BallTrajectoryTracker()
         players: dict[int, tuple[PlayerObservation, ...]] = {}
         courts: dict[int, CourtFrame] = {}
         balls: dict[int, BallObservation] = {}
@@ -429,15 +458,13 @@ class Rtv4X3DObservationProvider:
         court_processor = self._court_estimator.begin_video()
         timings = {
             "decode_seconds": 0.0,
+            "detector_frames": 0,
             "detector_seconds": 0.0,
             "postprocess_seconds": 0.0,
             "embedding_seconds": 0.0,
             "tracking_seconds": 0.0,
         }
         inference_started = perf_counter()
-        last_players: tuple[PlayerObservation, ...] = ()
-        last_ball: BallObservation | None = None
-        last_actions: tuple[ActionObservation, ...] = ()
         frame_index = 0
         try:
             while True:
@@ -447,70 +474,23 @@ class Rtv4X3DObservationProvider:
                 if not ok:
                     break
                 typed_frame = np.asarray(frame, dtype=np.uint8)
-                if frame_index % self.detector_stride == 0:
-                    observed = self._infer_observations(
-                        typed_frame,
-                        frame_index=frame_index,
-                        width=width,
-                        height=height,
-                        tracker=tracker,
-                    )
-                    last_players = observed.players
-                    last_ball = observed.ball
-                    last_actions = observed.actions
-                    timings["detector_seconds"] += observed.detector_seconds
-                    timings["postprocess_seconds"] += observed.postprocess_seconds
-                    timings["embedding_seconds"] += observed.embedding_seconds
-                    timings["tracking_seconds"] += observed.tracking_seconds
-                else:
-                    gap = frame_index % self.detector_stride
-                    confidence_scale = 0.995**gap
-                    last_players = tuple(
-                        PlayerObservation(
-                            frame_index=frame_index,
-                            source_track_id=item.track_id,
-                            track_id=item.track_id,
-                            frame_bbox=normalize_frame_bbox(
-                                (
-                                    float(item.bbox[0]),
-                                    float(item.bbox[1]),
-                                    float(item.bbox[2]),
-                                    float(item.bbox[3]),
-                                ),
-                                width=width,
-                                height=height,
-                            ),
-                            frame_foot_pos=(
-                                _unit_interval(
-                                    float((item.bbox[0] + item.bbox[2]) / (2.0 * width))
-                                ),
-                                _unit_interval(float(item.bbox[3] / height)),
-                            ),
-                            court_pos=None,
-                            confidence=item.score * confidence_scale,
-                        )
-                        for item in tracker.predict(frame_index)
-                    )
-                    last_ball = (
-                        replace(
-                            last_ball,
-                            frame_index=frame_index,
-                            confidence=(
-                                last_ball.confidence * confidence_scale
-                                if last_ball.confidence is not None
-                                else None
-                            ),
-                        )
-                        if last_ball is not None
-                        else None
-                    )
-                    last_actions = tuple(
-                        replace(action, frame_index=frame_index) for action in last_actions
-                    )
-                players[frame_index] = last_players
-                if last_ball is not None:
-                    balls[frame_index] = last_ball
-                for action in last_actions:
+                observed = self._infer_observations(
+                    typed_frame,
+                    frame_index=frame_index,
+                    width=width,
+                    height=height,
+                    tracker=tracker,
+                    ball_tracker=ball_tracker,
+                )
+                timings["detector_frames"] += 1
+                timings["detector_seconds"] += observed.detector_seconds
+                timings["postprocess_seconds"] += observed.postprocess_seconds
+                timings["embedding_seconds"] += observed.embedding_seconds
+                timings["tracking_seconds"] += observed.tracking_seconds
+                players[frame_index] = observed.players
+                if observed.ball is not None:
+                    balls[frame_index] = observed.ball
+                for action in observed.actions:
                     actions[(frame_index, action.track_id)] = action
 
                 courts.update(court_processor.submit(frame_index, typed_frame))
@@ -541,7 +521,7 @@ class Rtv4X3DObservationProvider:
             metadata={
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
-                "detector_stride": self.detector_stride,
+                "detector_stride": 1,
                 "detector_input_size": list(self._input_size),
                 "detector_input_scale": self.detector_input_scale,
                 "reid_every": self.reid_every,
@@ -720,8 +700,9 @@ class Rtv4X3DObservationProvider:
         width: int,
         height: int,
         tracker: HarmonicMeanTracker,
+        ball_tracker: BallTrajectoryTracker,
     ) -> _DetectorObservations:
-        """Run one sparse detector step and return normalized observations."""
+        """Run the detector on one canonical source frame and normalize observations."""
         started = perf_counter()
         result = self._infer_detector(frame, width, height)
         detector_seconds = perf_counter() - started
@@ -731,7 +712,7 @@ class Rtv4X3DObservationProvider:
         person_indices = np.flatnonzero((labels == 0) & (scores >= self.detector_threshold))
         person_boxes = boxes[person_indices].astype(np.float32, copy=False)
         person_scores = scores[person_indices].astype(np.float32, copy=False)
-        should_embed = (frame_index // self.detector_stride) % self.reid_every == 0
+        should_embed = frame_index % self.reid_every == 0
         if should_embed:
             started = perf_counter()
             embeddings = self._embeddings(frame, person_boxes)
@@ -770,6 +751,8 @@ class Rtv4X3DObservationProvider:
                     confidence=item.score,
                 )
             )
+            if item.detection_index < 0:
+                continue
             model_index = int(person_indices[item.detection_index])
             if action_labels is None or model_index >= len(action_labels):
                 continue
@@ -790,19 +773,19 @@ class Rtv4X3DObservationProvider:
                 )
             )
 
-        ball = None
         ball_indices = np.flatnonzero((labels == 1) & (scores >= self.detector_threshold))
-        if len(ball_indices):
-            ball_index = int(ball_indices[np.argmax(scores[ball_indices])])
-            ball_box = boxes[ball_index]
-            ball = BallObservation(
-                frame_index=frame_index,
-                frame_pos=(
-                    _unit_interval(float((ball_box[0] + ball_box[2]) / (2.0 * width))),
-                    _unit_interval(float((ball_box[1] + ball_box[3]) / (2.0 * height))),
-                ),
-                confidence=float(scores[ball_index]),
+        ball_candidates = [
+            (
+                _unit_interval(float((boxes[index][0] + boxes[index][2]) / (2.0 * width))),
+                _unit_interval(float((boxes[index][1] + boxes[index][3]) / (2.0 * height))),
             )
+            for index in ball_indices
+        ]
+        ball = ball_tracker.update(
+            frame_index,
+            ball_candidates,
+            [float(scores[index]) for index in ball_indices],
+        )
         return _DetectorObservations(
             players=tuple(players),
             ball=ball,

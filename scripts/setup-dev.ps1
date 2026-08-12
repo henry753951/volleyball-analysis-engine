@@ -51,7 +51,7 @@ Copy-ModelAsset -Source $Rtv4Checkpoint -Destination (Join-Path $modelTarget "be
 Push-Location $projectRoot
 try {
     uv sync --extra $TorchBackend --extra models --extra dev
-    uv run volleyball-analysis doctor --load-models
+    uv run --no-sync volleyball-analysis doctor --load-models
 }
 finally {
     Pop-Location

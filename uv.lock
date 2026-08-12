@@ -1683,8 +1683,8 @@ wheels = [
 
 [[package]]
 name = "volley-court-lines"
-version = "0.1.0"
-source = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.0/volley_court_lines-0.1.0-py3-none-any.whl" }
+version = "0.1.1"
+source = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.1/volley_court_lines-0.1.1-py3-none-any.whl" }
 dependencies = [
     { name = "numpy" },
     { name = "opencv-python" },
@@ -1696,7 +1696,7 @@ dependencies = [
     { name = "ultralytics" },
 ]
 wheels = [
-    { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.0/volley_court_lines-0.1.0-py3-none-any.whl", hash = "sha256:a7460a5a4ab20226937f6509270b8d86bd76799b578bdb15d07ec5288fe779db" },
+    { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.1/volley_court_lines-0.1.1-py3-none-any.whl", hash = "sha256:7b61028f9634c601f45145d18e33903efea22365a4f287935c4984ff7f3f6768" },
 ]
 
 [package.metadata]
@@ -1779,7 +1779,7 @@ requires-dist = [
     { name = "torchvision", marker = "extra == 'cu130'", specifier = ">=0.26.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "volleyball-analysis-engine", extra = "cu130" } },
     { name = "transformers", marker = "extra == 'models'", specifier = ">=4.55.0" },
     { name = "ultralytics", marker = "extra == 'models'", specifier = ">=8.3.0,<9" },
-    { name = "volley-court-lines", url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.0/volley_court_lines-0.1.0-py3-none-any.whl" },
+    { name = "volley-court-lines", url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.1/volley_court_lines-0.1.1-py3-none-any.whl" },
     { name = "volleyball-monitoring-ai-sdk", directory = "../volleyball-monitoring-ai/sdk" },
 ]
 provides-extras = ["cpu", "cu130", "dev", "models"]

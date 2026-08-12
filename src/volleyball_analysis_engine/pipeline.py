@@ -231,7 +231,6 @@ class AnalysisPipeline:
     ) -> tuple[list[FrameObservation], dict[int, NDArray[np.float64]]]:
         mapped: dict[int, FrameObservation] = {}
         homographies: dict[int, NDArray[np.float64]] = {}
-        last_homography: NDArray[np.float64] | None = None
         for source_frame in sorted(source_players):
             destination_frame = self._map_frame(
                 source_frame,
@@ -248,10 +247,7 @@ class AnalysisPipeline:
                 )
             )
             if homography is not None:
-                last_homography = homography
-            effective_homography = homography if homography is not None else last_homography
-            if effective_homography is not None:
-                homographies[destination_frame] = effective_homography
+                homographies[destination_frame] = homography
             players = tuple(
                 PlayerObservation(
                     frame_index=destination_frame,
@@ -261,10 +257,10 @@ class AnalysisPipeline:
                     frame_foot_pos=player.frame_foot_pos,
                     court_pos=(
                         player.court_pos
-                        if effective_homography is None
+                        if homography is None
                         else project_normalized_frame_point(
                             player.frame_foot_pos,
-                            effective_homography,
+                            homography,
                             frame_width=frame_width,
                             frame_height=frame_height,
                         )
@@ -276,7 +272,7 @@ class AnalysisPipeline:
             mapped[destination_frame] = FrameObservation(
                 frame_index=destination_frame,
                 players=players,
-                homography_available=effective_homography is not None,
+                homography_available=homography is not None,
             )
         return [mapped[index] for index in sorted(mapped)], homographies
 
@@ -687,7 +683,7 @@ class AnalysisPipeline:
         frame_width: int,
         frame_height: int,
     ) -> dict[int, list[dict[str, Any]]]:
-        """Map and hold the latest valid court pose across canonical frames."""
+        """Map only court poses that belong to the exact canonical frame."""
         mapped: dict[int, list[dict[str, Any]]] = {}
         for source_frame, court in sorted(courts.items()):
             if not court.available:
@@ -710,11 +706,4 @@ class AnalysisPipeline:
                 if keypoint.frame_pos_px is not None
             ]
 
-        result: dict[int, list[dict[str, Any]]] = {}
-        active: list[dict[str, Any]] | None = None
-        for frame_index in range(destination_frames):
-            if frame_index in mapped:
-                active = mapped[frame_index]
-            if active is not None:
-                result[frame_index] = active
-        return result
+        return mapped

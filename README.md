@@ -81,23 +81,35 @@ separates model warmup from job wall time and reports effective FPS and real-tim
 ### Local RTX 5070 benchmark
 
 The checked-in quality profile performs fresh player, ball, action, ReID, and court-line model
-inference on every source frame. Court identity/layout matching runs until a layout is accepted,
-then refreshes every 120 frames; optical flow advances the accepted geometry against every
-intermediate source frame. Model warmup is intentionally outside job wall time because the online
-worker completes it before registering. Developer preview rendering is disabled online by default;
-its final H.264/AAC web encode uses NVENC when available and falls back to libx264.
+inference on every source frame. Court identity/layout matching also runs on every frame. The
+previous accepted topology is only a bounded prior for matching the current frame's line geometry;
+it is not reused as stale output. Ambiguous frames abstain instead of drawing a fake complete court.
+Model warmup is intentionally outside job wall time because the online worker completes it before
+registering. Developer preview rendering is disabled online by default; its final H.264/AAC web
+encode uses NVENC when available and falls back to libx264.
 
 Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds):
 
 | Path | Job wall time | Effective FPS | Real-time factor |
 | --- | ---: | ---: | ---: |
-| Every-frame result + VOV1 overlay | 79.071 s | 11.18 | 0.187x |
-| Every-frame 1920x1080 preview package | 118.224 s | 7.48 | 0.125x |
+| Quality: every model on every frame | 76.657 s | 11.53 | 0.193x |
+| Realtime: detector every 4 frames, ReID every 8 frames, court every frame | 29.017 s | 30.46 | 0.510x |
+| Quality + 1920x1080 preview package | 112.420 s | 7.86 | 0.132x |
 
-The current RT-DETRv4/X3D and OSNet stack is not real-time when both models run on all 884 frames.
-The earlier throughput profile that reused detections between sampled frames is intentionally not
-the default. The rendered H.264 stream is also checked to contain all 884 frames; audio ending a
-few milliseconds earlier does not truncate the video stream.
+The realtime profile keeps court inference and identity matching at every source frame. It runs
+RT-DETRv4/X3D every fourth frame, OSNet on every second detector update (every eighth source frame),
+and extrapolates tracked boxes with measured velocity on the intervening frames. Enable it with:
+
+```dotenv
+VOLLYAI_DETECTOR_STRIDE=4
+VOLLYAI_REID_EVERY=2
+VOLLYAI_COURT_BATCH_SIZE=16
+VOLLYAI_COURT_LAYOUT_EVERY=1
+```
+
+The quality profile remains the default because the realtime profile trades detector/action
+temporal detail for throughput. The rendered H.264 stream is checked to contain all 884 frames;
+audio ending a few milliseconds earlier does not truncate the video stream.
 
 Output:
 
@@ -161,8 +173,9 @@ typed result through the authenticated callback.
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.
-RT-DETR runs at a configurable cadence while tracking and the wire contract remain frame-complete.
-The court layout is refreshed by the model and advanced between refreshes with optical flow.
+RT-DETR runs at a configurable cadence while velocity-aware tracking and the wire contract remain
+frame-complete. Court inference and identity matching run on every source frame by default; a prior
+layout only constrains the current-frame match and never replaces it.
 
 For the local Docker Compose central server, create a managed Worker Token and start the worker in
 one command. The token is passed only through the child-process environment and is not written to

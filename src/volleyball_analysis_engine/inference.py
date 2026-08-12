@@ -19,7 +19,7 @@ from numpy.typing import NDArray
 from scipy.optimize import linear_sum_assignment  # pyright: ignore[reportUnknownVariableType]
 from volleyball_monitoring_ai import AIJobRequest
 
-from .court import CourtLineEstimator
+from .court import CourtLineEstimator, interpolate_short_court_gaps
 from .records import (
     ActionObservation,
     BallObservation,
@@ -123,6 +123,7 @@ class _Track:
     embedding: NDArray[np.float32]
     score: float
     last_frame: int
+    velocity: NDArray[np.float32]
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +204,9 @@ class HarmonicMeanTracker:
         output: list[_TrackedDetection] = []
         for row, detection_index in matches:
             track = active[row]
+            elapsed = max(1, frame_index - track.last_frame)
+            observed_velocity = (boxes[detection_index] - track.bbox) / elapsed
+            track.velocity = 0.65 * track.velocity + 0.35 * observed_velocity
             track.bbox = boxes[detection_index].copy()
             if embeddings is not None:
                 track.embedding = (
@@ -238,6 +242,7 @@ class HarmonicMeanTracker:
                 ),
                 score=float(scores[detection_index]),
                 last_frame=frame_index,
+                velocity=np.zeros(4, dtype=np.float32),
             )
             self._tracks[track.track_id] = track
             self._next_id += 1
@@ -246,6 +251,23 @@ class HarmonicMeanTracker:
                     track.track_id,
                     detection_index,
                     track.bbox.copy(),
+                    track.score,
+                )
+            )
+        return output
+
+    def predict(self, frame_index: int) -> list[_TrackedDetection]:
+        """Extrapolate active boxes between detector frames without changing identity state."""
+        output: list[_TrackedDetection] = []
+        for track in self._tracks.values():
+            elapsed = frame_index - track.last_frame
+            if elapsed <= 0 or elapsed > self.max_lost_frames:
+                continue
+            output.append(
+                _TrackedDetection(
+                    track.track_id,
+                    -1,
+                    track.bbox + track.velocity * elapsed,
                     track.score,
                 )
             )
@@ -332,6 +354,7 @@ class Rtv4X3DObservationProvider:
         backend: str = "continual",
         detector_threshold: float = 0.4,
         detector_stride: int = 1,
+        detector_input_scale: float = 1.0,
         reid_every: int = 1,
         court_model: str | Path | None = "v1",
         court_imgsz: int = 640,
@@ -339,7 +362,7 @@ class Rtv4X3DObservationProvider:
         court_layout_every: int = 1,
         court_refresh_every: int = 120,
         court_track_every: int = 1,
-        court_max_hold_frames: int = 30,
+        court_max_hold_frames: int = 180,
         court_decoder: str = "cuda",
         disable_amp: bool = False,
     ) -> None:
@@ -349,6 +372,7 @@ class Rtv4X3DObservationProvider:
         self.backend = backend
         self.detector_threshold = detector_threshold
         self.detector_stride = max(1, detector_stride)
+        self.detector_input_scale = min(1.0, max(0.5, detector_input_scale))
         self.reid_every = max(1, reid_every)
         self.court_model = court_model
         self.court_imgsz = court_imgsz
@@ -442,16 +466,30 @@ class Rtv4X3DObservationProvider:
                     gap = frame_index % self.detector_stride
                     confidence_scale = 0.995**gap
                     last_players = tuple(
-                        replace(
-                            player,
+                        PlayerObservation(
                             frame_index=frame_index,
-                            confidence=(
-                                player.confidence * confidence_scale
-                                if player.confidence is not None
-                                else None
+                            source_track_id=item.track_id,
+                            track_id=item.track_id,
+                            frame_bbox=normalize_frame_bbox(
+                                (
+                                    float(item.bbox[0]),
+                                    float(item.bbox[1]),
+                                    float(item.bbox[2]),
+                                    float(item.bbox[3]),
+                                ),
+                                width=width,
+                                height=height,
                             ),
+                            frame_foot_pos=(
+                                _unit_interval(
+                                    float((item.bbox[0] + item.bbox[2]) / (2.0 * width))
+                                ),
+                                _unit_interval(float(item.bbox[3] / height)),
+                            ),
+                            court_pos=None,
+                            confidence=item.score * confidence_scale,
                         )
-                        for player in last_players
+                        for item in tracker.predict(frame_index)
                     )
                     last_ball = (
                         replace(
@@ -485,6 +523,7 @@ class Rtv4X3DObservationProvider:
         finally:
             capture.release()
         courts.update(court_processor.finish())
+        court_processor.timing.interpolated_frames = interpolate_short_court_gaps(courts)
         inference_seconds = perf_counter() - inference_started
         if frame_index != expected_frames:
             raise ValueError(
@@ -503,6 +542,8 @@ class Rtv4X3DObservationProvider:
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
                 "detector_stride": self.detector_stride,
+                "detector_input_size": list(self._input_size),
+                "detector_input_scale": self.detector_input_scale,
                 "reid_every": self.reid_every,
                 "tracker": "harmonic-mean-eiou+OSNet+court-reentry",
                 "court_detector": "court-line-yolo26n-v3+pose36-layout-tracker",
@@ -548,12 +589,16 @@ class Rtv4X3DObservationProvider:
         postprocessor = yaml_config.postprocessor.to(device).eval()
         stream_config = yaml_config.yaml_cfg.get("streaming", {})
         frame_num = int(stream_config.get("frame_num", 5))
-        self._input_size = tuple(
+        configured_input_size = tuple(
             int(value)
             for value in stream_config.get(
                 "input_size",
                 yaml_config.yaml_cfg.get("eval_spatial_size", [576, 1024]),
             )
+        )
+        self._input_size = tuple(
+            max(160, round(value * self.detector_input_scale / 32.0) * 32)
+            for value in configured_input_size
         )
         self._use_amp = (
             bool(stream_config.get("amp", True)) and device.type == "cuda" and not self.disable_amp

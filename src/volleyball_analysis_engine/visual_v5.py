@@ -268,7 +268,43 @@ def _draw_court_keypoints(
         return False
     layer = frame.copy()
     drawn = False
-    label_boxes: list[tuple[int, int, int, int]] = []
+    projected: dict[int, tuple[int, int]] = {}
+    for keypoint in court.keypoints:
+        if keypoint.frame_pos_px is None:
+            continue
+        source_x, source_y = keypoint.frame_pos_px
+        projected[keypoint.index] = (
+            round(source_x / max(source_width, 1) * (VIDEO_WIDTH - 1)),
+            round(source_y / max(source_height, 1) * (VIDEO_HEIGHT - 1)),
+        )
+
+    # Accepted Pose36 layouts always render as the complete seven-line court.
+    # The cyan geometry is homography-projected; gold diamonds remain the model
+    # keypoints so the two sources are visually distinct.
+    for first, second in ((0, 4), (4, 5), (5, 9), (9, 0), (1, 8), (2, 7), (3, 6)):
+        start = projected.get(first)
+        end = projected.get(second)
+        if start is None or end is None:
+            continue
+        visible, clipped_start, clipped_end = cv2.clipLine(
+            (0, 0, VIDEO_WIDTH, VIDEO_HEIGHT),
+            start,
+            end,
+        )
+        if not visible:
+            continue
+        cv2.line(layer, clipped_start, clipped_end, (14, 24, 28), 5, cv2.LINE_AA)
+        cv2.line(layer, clipped_start, clipped_end, (235, 205, 70), 2, cv2.LINE_AA)
+        drawn = True
+
+    label_offsets = (
+        (9, -7),
+        (9, 19),
+        (-31, -7),
+        (-31, 19),
+        (9, 35),
+        (-31, 35),
+    )
     for keypoint in court.keypoints:
         if keypoint.frame_pos_px is None:
             continue
@@ -295,53 +331,18 @@ def _draw_court_keypoints(
             0.30,
             1,
         )
-        candidates = (
-            (9, -7),
-            (9, 19),
-            (-text_width - 13, -7),
-            (-text_width - 13, 19),
-            (9, 35),
-            (-text_width - 13, 35),
+        offset_x, offset_y = label_offsets[keypoint.index % len(label_offsets)]
+        if offset_x < 0:
+            offset_x = -text_width - 13
+        label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
+        label_y = max(
+            text_height + 4,
+            min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
         )
-        chosen: tuple[int, int, int, int, int, int] | None = None
-        for offset_x, offset_y in candidates:
-            label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
-            label_y = max(
-                text_height + 4,
-                min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
-            )
-            box = (
-                label_x - 3,
-                label_y - text_height - 3,
-                label_x + text_width + 4,
-                label_y + baseline + 2,
-            )
-            overlaps = any(
-                box[0] < other[2] + 3
-                and box[2] + 3 > other[0]
-                and box[1] < other[3] + 3
-                and box[3] + 3 > other[1]
-                for other in label_boxes
-            )
-            if not overlaps:
-                chosen = (*box, label_x, label_y)
-                break
-        if chosen is None:
-            offset_x, offset_y = candidates[keypoint.index % len(candidates)]
-            label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
-            label_y = max(
-                text_height + 4,
-                min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
-            )
-            chosen = (
-                label_x - 3,
-                label_y - text_height - 3,
-                label_x + text_width + 4,
-                label_y + baseline + 2,
-                label_x,
-                label_y,
-            )
-        box_left, box_top, box_right, box_bottom, label_x, label_y = chosen
+        box_left = label_x - 3
+        box_top = label_y - text_height - 3
+        box_right = label_x + text_width + 4
+        box_bottom = label_y + baseline + 2
         if abs(label_x - x) > 12 or abs(label_y - y) > 18:
             cv2.line(
                 layer,
@@ -368,7 +369,6 @@ def _draw_court_keypoints(
             1,
             cv2.LINE_AA,
         )
-        label_boxes.append((box_left, box_top, box_right, box_bottom))
         drawn = True
     if drawn:
         cv2.addWeighted(layer, 0.42, frame, 0.58, 0, frame)
@@ -1055,7 +1055,7 @@ def _render_video(
 
     frame_map = {observation.frame_index: observation for observation in frames}
     events = cast("list[dict[str, Any]]", result["contact_events"])
-    event_frames = [int(event["anchor_frame_index"]) for event in events]
+    event_frames: list[int] = [int(event["anchor_frame_index"]) for event in events]
     key_points = cast("list[dict[str, Any]]", job["key_points"])
     points_by_id = {point["key_point_id"]: point for point in key_points}
     total_frames = int(job["clip"]["video"]["total_frames"])
@@ -1063,10 +1063,7 @@ def _render_video(
     preview_by_index: dict[int, list[Path]] = {}
     for preview_index, preview_path in zip(preview_indices, preview_paths, strict=True):
         preview_by_index.setdefault(preview_index, []).append(preview_path)
-    sorted_courts = sorted(courts.items())
-    court_cursor = 0
-    active_court: CourtFrame | None = None
-    frame_index = 0
+    frame_index: int = 0
     tracking_frames = 0
     tracking_rows = 0
     ball_frames = 0
@@ -1076,11 +1073,7 @@ def _render_video(
             ok, source_frame = capture.read()
             if not ok:
                 break
-            while (
-                court_cursor < len(sorted_courts) and sorted_courts[court_cursor][0] <= frame_index
-            ):
-                active_court = sorted_courts[court_cursor][1]
-                court_cursor += 1
+            active_court = courts.get(frame_index)
             image = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
             image[:VIDEO_HEIGHT, :VIDEO_WIDTH] = cv2.resize(
                 source_frame,
@@ -1106,7 +1099,7 @@ def _render_video(
             if events:
                 nearest_index = min(
                     range(len(events)),
-                    key=lambda index: abs(event_frames[index] - frame_index),
+                    key=lambda index: abs(int(event_frames[index]) - int(frame_index)),
                 )
                 event = events[nearest_index]
             else:

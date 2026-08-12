@@ -23,7 +23,7 @@ $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
 Push-Location $projectRoot
 try {
-    uv run volleyball-analysis worker
+    uv run --no-sync volleyball-analysis worker
 }
 finally {
     Pop-Location

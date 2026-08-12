@@ -69,7 +69,7 @@ torchvision = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu130", extra = "cu130" },
 ]
-volley-court-lines = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.0/volley_court_lines-0.1.0-py3-none-any.whl" }
+volley-court-lines = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.1.1/volley_court_lines-0.1.1-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"

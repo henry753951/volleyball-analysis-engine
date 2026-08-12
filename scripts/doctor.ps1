@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$arguments = @("run", "volleyball-analysis", "doctor")
+$arguments = @("run", "--no-sync", "volleyball-analysis", "doctor")
 if ($Clip) {
     $arguments += @("--clip", $Clip)
 }

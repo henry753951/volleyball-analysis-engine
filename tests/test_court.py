@@ -7,7 +7,11 @@ import numpy as np
 from volley_court import CourtKeypoint as ModelCourtKeypoint
 from volley_court import CourtLayout, CourtLineModel
 
-from volleyball_analysis_engine.court import CourtVideoProcessor, interpolate_short_court_gaps
+from volleyball_analysis_engine.court import (
+    POSE36_CANONICAL_POINTS,
+    CourtVideoProcessor,
+    interpolate_short_court_gaps,
+)
 from volleyball_analysis_engine.records import CourtFrame, CourtKeypoint
 
 
@@ -131,3 +135,50 @@ def test_short_court_gap_is_interpolated_from_both_neighbor_frames() -> None:
 
     assert interpolate_short_court_gaps(courts) == 1
     assert courts[11].keypoints[0].frame_pos_px == (1.0, 0.0)
+
+
+def test_layout_orientation_lock_corrects_a_both_axis_recovery_flip() -> None:
+    def layout(*, flipped: bool) -> CourtLayout:
+        points = tuple(
+            ModelCourtKeypoint(
+                index,
+                20.0 * (9.0 - x if flipped else x) + 100.0,
+                10.0 * (18.0 - y if flipped else y) + 50.0,
+                0.9,
+                True,
+                "test",
+            )
+            for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
+        )
+        homography = (
+            (-20.0, 0.0, 280.0),
+            (0.0, -10.0, 230.0),
+            (0.0, 0.0, 1.0),
+        ) if flipped else (
+            (20.0, 0.0, 100.0),
+            (0.0, 10.0, 50.0),
+            (0.0, 0.0, 1.0),
+        )
+        return CourtLayout(
+            status="ok",
+            score=0.9,
+            reason="test",
+            keypoints=points,
+            candidate_keypoints=points,
+            matched_line_count=7,
+            hypothesis_margin=0.5,
+            semantic_alignment=1.0,
+            homography=homography,
+        )
+
+    reference = layout(flipped=False)
+    corrected, orientation = CourtVideoProcessor._align_orientation(  # pyright: ignore[reportPrivateUsage]  # noqa: SLF001
+        layout(flipped=True),
+        reference,
+    )
+
+    assert orientation == "both"
+    assert [(point.x, point.y) for point in corrected.keypoints] == [
+        (point.x, point.y) for point in reference.keypoints
+    ]
+    assert corrected.homography == reference.homography

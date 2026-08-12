@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from time import perf_counter
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -34,6 +36,66 @@ COURT_WORLD_POINTS = (
 )
 POSE36_POINT_COUNT = 36
 FULL_SEARCH_RECOVERY_AFTER = 5
+MAXIMUM_LAYOUT_JUMP_RATIO = 0.12
+ORIENTATION_MARGIN_RATIO = 0.04
+MINIMUM_LAYOUT_COMPARISON_POINTS = 4
+POSE36_CANONICAL_POINTS = (
+    (0.0, 0.0),
+    (0.0, 6.0),
+    (0.0, 9.0),
+    (0.0, 12.0),
+    (0.0, 18.0),
+    (9.0, 18.0),
+    (9.0, 12.0),
+    (9.0, 9.0),
+    (9.0, 6.0),
+    (9.0, 0.0),
+    (0.0, 2.0),
+    (0.0, 4.0),
+    (0.0, 7.0),
+    (0.0, 8.0),
+    (0.0, 10.0),
+    (0.0, 11.0),
+    (0.0, 14.0),
+    (0.0, 16.0),
+    (3.0, 18.0),
+    (6.0, 18.0),
+    (9.0, 16.0),
+    (9.0, 14.0),
+    (9.0, 11.0),
+    (9.0, 10.0),
+    (9.0, 8.0),
+    (9.0, 7.0),
+    (9.0, 4.0),
+    (9.0, 2.0),
+    (6.0, 0.0),
+    (3.0, 0.0),
+    (3.0, 6.0),
+    (6.0, 6.0),
+    (3.0, 9.0),
+    (6.0, 9.0),
+    (3.0, 12.0),
+    (6.0, 12.0),
+)
+_POSE36_INDEX = {point: index for index, point in enumerate(POSE36_CANONICAL_POINTS)}
+_ORIENTATION_TRANSFORMS = {
+    "identity": np.eye(3, dtype=np.float64),
+    "left_right": np.asarray(((-1.0, 0.0, 9.0), (0.0, 1.0, 0.0), (0.0, 0.0, 1.0))),
+    "near_far": np.asarray(((1.0, 0.0, 0.0), (0.0, -1.0, 18.0), (0.0, 0.0, 1.0))),
+    "both": np.asarray(((-1.0, 0.0, 9.0), (0.0, -1.0, 18.0), (0.0, 0.0, 1.0))),
+}
+_ORIENTATION_PERMUTATIONS = {
+    name: tuple(
+        _POSE36_INDEX[
+            (
+                float(transform[0, 0] * x + transform[0, 2]),
+                float(transform[1, 1] * y + transform[1, 2]),
+            )
+        ]
+        for x, y in POSE36_CANONICAL_POINTS
+    )
+    for name, transform in _ORIENTATION_TRANSFORMS.items()
+}
 
 
 @dataclass(slots=True)
@@ -47,6 +109,8 @@ class CourtTiming:
     rejected_layouts: int = 0
     rejected_tracking_updates: int = 0
     recovery_layouts: int = 0
+    orientation_corrections: int = 0
+    orientation_jump_rejections: int = 0
     interpolated_frames: int = 0
     layout_attempts: int = 0
     prior_refined_matches: int = 0
@@ -67,6 +131,8 @@ class CourtTiming:
             "rejected_layouts": self.rejected_layouts,
             "rejected_tracking_updates": self.rejected_tracking_updates,
             "recovery_layouts": self.recovery_layouts,
+            "orientation_corrections": self.orientation_corrections,
+            "orientation_jump_rejections": self.orientation_jump_rejections,
             "interpolated_frames": self.interpolated_frames,
             "layout_attempts": self.layout_attempts,
             "prior_refined_matches": self.prior_refined_matches,
@@ -157,6 +223,7 @@ class CourtVideoProcessor:
         )
         self._pending: list[tuple[int, NDArray[np.uint8]]] = []
         self._last_reliable_layout: CourtLayout | None = None
+        self._output_orientation = "identity"
         self._consecutive_match_misses = 0
         self.timing = CourtTiming()
 
@@ -243,17 +310,37 @@ class CourtVideoProcessor:
                 if recovered is not None and recovered.status == "ok":
                     candidate = recovered
                     self._tracker.reset()
-                    self._last_reliable_layout = None
                     self._consecutive_match_misses = 0
                     self.timing.recovery_layouts += 1
         else:
             self._consecutive_match_misses = 0
 
         accepted = candidate if candidate is not None and candidate.status == "ok" else None
+        if accepted is not None and prior is not None:
+            aligned, correction = self._align_orientation(accepted, prior)
+            jump = self._layout_jump_px(prior, aligned)
+            maximum_jump = MAXIMUM_LAYOUT_JUMP_RATIO * math.hypot(
+                float(frame.shape[1]),
+                float(frame.shape[0]),
+            )
+            if jump is None or jump > maximum_jump:
+                accepted = None
+                self.timing.orientation_jump_rejections += 1
+            elif correction != "identity":
+                self._output_orientation = self._compose_orientations(
+                    correction,
+                    self._output_orientation,
+                )
+                self.timing.orientation_corrections += 1
         tracked = self._track(accepted, frame)
         if accepted is None:
             return None
-        court = self._court_frame(frame_index, tracked)
+        output_layout = (
+            None
+            if tracked is None
+            else self._reorient_layout(tracked, self._output_orientation)
+        )
+        court = self._court_frame(frame_index, output_layout)
         if court is not None:
             self._last_reliable_layout = accepted or tracked
         return court
@@ -291,6 +378,105 @@ class CourtVideoProcessor:
         )
         self.timing.tracking_seconds += perf_counter() - started
         return tracked
+
+    @staticmethod
+    def _align_orientation(
+        candidate: CourtLayout,
+        reference: CourtLayout,
+    ) -> tuple[CourtLayout, str]:
+        """Keep Pose36 left/right and near/far identities stable for one clip."""
+        reference_points = {point.id: point for point in reference.keypoints}
+        candidate_points = {point.id: point for point in candidate.keypoints}
+        if (
+            len(reference_points) != POSE36_POINT_COUNT
+            or len(candidate_points) != POSE36_POINT_COUNT
+        ):
+            return candidate, "identity"
+        scores = {
+            name: float(
+                np.median(
+                    [
+                        math.hypot(
+                            candidate_points[candidate_id].x - reference_points[reference_id].x,
+                            candidate_points[candidate_id].y - reference_points[reference_id].y,
+                        )
+                        for reference_id, candidate_id in enumerate(permutation)
+                    ]
+                )
+            )
+            for name, permutation in _ORIENTATION_PERMUTATIONS.items()
+        }
+        best = min(scores, key=scores.__getitem__)
+        reference_span = max(
+            math.hypot(
+                max(point.x for point in reference_points.values())
+                - min(point.x for point in reference_points.values()),
+                max(point.y for point in reference_points.values())
+                - min(point.y for point in reference_points.values()),
+            ),
+            1.0,
+        )
+        if (
+            best == "identity"
+            or scores[best] + ORIENTATION_MARGIN_RATIO * reference_span >= scores["identity"]
+        ):
+            return candidate, "identity"
+        return CourtVideoProcessor._reorient_layout(candidate, best), best
+
+    @staticmethod
+    def _reorient_layout(layout: CourtLayout, orientation: str) -> CourtLayout:
+        if orientation == "identity":
+            return layout
+        permutation = _ORIENTATION_PERMUTATIONS[orientation]
+
+        def reindex(points: tuple[Any, ...]) -> tuple[Any, ...]:
+            if len(points) != POSE36_POINT_COUNT:
+                return points
+            by_id = {point.id: point for point in points}
+            if len(by_id) != POSE36_POINT_COUNT:
+                return points
+            return tuple(
+                replace(by_id[candidate_id], id=reference_id)
+                for reference_id, candidate_id in enumerate(permutation)
+            )
+
+        homography = layout.homography
+        if homography is not None:
+            normalized = (
+                np.asarray(homography, dtype=np.float64)
+                @ _ORIENTATION_TRANSFORMS[orientation]
+            )
+            homography = tuple(tuple(float(value) for value in row) for row in normalized)
+        return replace(
+            layout,
+            keypoints=reindex(layout.keypoints),
+            candidate_keypoints=reindex(layout.candidate_keypoints),
+            homography=homography,
+            reason=f"orientation locked ({orientation})",
+        )
+
+    @staticmethod
+    def _compose_orientations(first: str, second: str) -> str:
+        composed = _ORIENTATION_TRANSFORMS[first] @ _ORIENTATION_TRANSFORMS[second]
+        return next(
+            name
+            for name, transform in _ORIENTATION_TRANSFORMS.items()
+            if np.allclose(composed, transform)
+        )
+
+    @staticmethod
+    def _layout_jump_px(current: CourtLayout, candidate: CourtLayout) -> float | None:
+        previous = {point.id: point for point in current.keypoints}
+        distances = [
+            math.hypot(point.x - previous[point.id].x, point.y - previous[point.id].y)
+            for point in candidate.keypoints
+            if point.id in previous
+        ]
+        return (
+            float(np.median(distances))
+            if len(distances) >= MINIMUM_LAYOUT_COMPARISON_POINTS
+            else None
+        )
 
     @staticmethod
     def _court_frame(frame_index: int, layout: CourtLayout | None) -> CourtFrame | None:

@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.5.2+frame-synchronous-tracking"
+    provider_build_id: str = "volleyball-analysis-engine/0.5.3+orientation-locked-court"
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"

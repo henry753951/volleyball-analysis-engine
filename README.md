@@ -93,7 +93,7 @@ Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds
 | Path | Job wall time | Effective FPS | Real-time factor |
 | --- | ---: | ---: | ---: |
 | Every model on every source frame | 73.654 s | 12.00 | 0.201x |
-| Every model + 1920x1080 preview package | 112.747 s | 7.84 | 0.131x |
+| Every model + 1920x1080 preview package | 103.455 s | 8.54 | 0.143x |
 
 RT-DETRv4/X3D detector cadence is fixed at every source frame and is intentionally not configurable.
 The tracker may bridge an isolated detector miss for at most two frames using measured velocity,
@@ -101,6 +101,11 @@ but its longer ReID recovery pool is never rendered. This prevents stale identit
 back into the overlay while retaining short-gap continuity. The rendered H.264 stream was checked
 to contain all 884 source frames; audio ending a few milliseconds earlier does not truncate the
 video stream.
+
+Court layout recovery keeps a clip-level Pose36 orientation transform. If full search recovers the
+same geometry with a left/right, near/far, or 180-degree symmetric identity, keypoint IDs and the
+output homography are mapped back to the established orientation. Raw model/tracker geometry stays
+unchanged, so the lock does not reduce per-frame matching or optical-flow continuity.
 
 Output:
 

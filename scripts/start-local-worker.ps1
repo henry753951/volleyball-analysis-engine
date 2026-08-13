@@ -2,11 +2,11 @@
 param(
     [string]$CentralHttpUrl = "http://localhost:10000",
     [string]$CentralWsUrl = "ws://localhost:10000/api/v1/ai/providers/ws",
-    [string]$InstanceKey = "analysis-worker-rtx5070-court-lines",
-    [string]$TokenName = "local-rtx5070-court-lines",
+    [string]$InstanceKey = "analysis-worker-rtx5070-reid-court-v3",
+    [string]$TokenName = "local-rtx5070-reid-court-v3",
     [int]$ReIdEvery = 1,
-    [string]$CourtModel = "v1",
-    [int]$CourtImageSize = 640,
+    [string]$CourtModel = "v3",
+    [int]$CourtImageSize = 512,
     [int]$Concurrency = 1
 )
 
@@ -37,6 +37,8 @@ $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
 $env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
 $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
+$env:VOLLYAI_COURT_BATCH_SIZE = "16"
+$env:VOLLYAI_COURT_DECODER = "auto"
 $env:VOLLYAI_WORKSPACE = Join-Path $projectRoot ".artifacts\workspaces"
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"

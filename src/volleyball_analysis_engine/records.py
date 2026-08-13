@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 CourtSide = Literal["left", "right", "unknown"]
+ReIdDistance = Literal["cosine"]
 COURT_MIDLINE_X = 0.5
 
 
@@ -78,3 +79,36 @@ class FrameObservation:
     frame_index: int
     players: tuple[PlayerObservation, ...]
     homography_available: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReIdEmbeddingModel:
+    """Versioned appearance extractor metadata carried with one feature snapshot."""
+
+    name: str
+    checkpoint_sha256: str
+    preprocess_version: str
+    dimension: int
+    distance: ReIdDistance
+
+
+@dataclass(frozen=True, slots=True)
+class ReIdTrackFeature:
+    """One compact clip-local appearance prototype for a run-local track."""
+
+    track_id: int
+    prototype: tuple[float, ...]
+    sample_count: int
+    first_frame_index: int
+    last_frame_index: int
+    mean_quality: float
+    cannot_link_track_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class ReIdFeatureSnapshot:
+    """Versioned sparse feature snapshot emitted after a canonical clip."""
+
+    schema_version: Literal["1.0.0"]
+    embedding_model: ReIdEmbeddingModel
+    features: tuple[ReIdTrackFeature, ...]

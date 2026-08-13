@@ -26,6 +26,14 @@ from .records import (
     BallObservation,
     CourtFrame,
     PlayerObservation,
+    ReIdEmbeddingModel,
+    ReIdFeatureSnapshot,
+)
+from .reid_features import (
+    REID_MIN_BBOX_HEIGHT_PX,
+    REID_MIN_OBSERVATIONS,
+    ReIdFeatureAccumulator,
+    sports_osnet_embedding_model,
 )
 
 ProgressReporter = Callable[[float, str], None]
@@ -77,6 +85,7 @@ class InferenceResult:
     frame_width: int
     frame_height: int
     fps: float
+    reid_feature_snapshot: ReIdFeatureSnapshot
     metadata: dict[str, Any] = field(default_factory=_empty_metadata)
 
 
@@ -153,15 +162,107 @@ class HarmonicMeanTracker:
         self,
         *,
         max_lost_frames: int = 120,
+        max_geometry_lost_frames: int = 120,
         max_prediction_frames: int = 2,
         match_threshold: float = 0.28,
+        # volley-reid calibrates raw cosine at 0.9144 with a 0.02 margin. This
+        # tracker maps cosine from [-1, 1] to [0, 1], so both values are transformed.
+        appearance_recovery_threshold: float = 0.9572026133537292,
+        appearance_recovery_margin: float = 0.01,
+        reid_min_observations: int = REID_MIN_OBSERVATIONS,
     ) -> None:
         self.max_lost_frames = max_lost_frames
+        self.max_geometry_lost_frames = min(max_lost_frames, max_geometry_lost_frames)
         self.max_prediction_frames = max(0, max_prediction_frames)
         self.match_threshold = match_threshold
+        self.appearance_recovery_threshold = appearance_recovery_threshold
+        self.appearance_recovery_margin = appearance_recovery_margin
         self._next_id = 1
         self._tracks: dict[int, _Track] = {}
         self._visible_track_ids: set[int] = set()
+        self._reid_features = ReIdFeatureAccumulator(
+            min_observations=reid_min_observations,
+        )
+
+    def _observe_reid_frame(
+        self,
+        *,
+        frame_index: int,
+        boxes: NDArray[np.float32],
+        scores: NDArray[np.float32],
+        embeddings: NDArray[np.float32] | None,
+        detection_track_ids: dict[int, int],
+    ) -> None:
+        """Aggregate sufficiently large real detections, never extrapolated boxes."""
+        eligible = {
+            detection_index: track_id
+            for detection_index, track_id in detection_track_ids.items()
+            if float(boxes[detection_index][3] - boxes[detection_index][1])
+            >= REID_MIN_BBOX_HEIGHT_PX
+        }
+        self._reid_features.observe_co_visibility(eligible.values())
+        if embeddings is None:
+            return
+        for detection_index, track_id in sorted(eligible.items()):
+            bbox_height = float(boxes[detection_index][3] - boxes[detection_index][1])
+            score = float(scores[detection_index])
+            self._reid_features.observe(
+                track_id=track_id,
+                frame_index=frame_index,
+                embedding=embeddings[detection_index],
+                quality=score,
+                selection_quality=score * bbox_height,
+            )
+
+    def _appearance_recovery_matches(
+        self,
+        active: list[_Track],
+        embeddings: NDArray[np.float32] | None,
+        matches: list[tuple[int, int]],
+    ) -> list[tuple[int, int]]:
+        """Recover only mutual, margin-separated appearance matches after geometry fails."""
+        if embeddings is None or not len(embeddings):
+            return []
+        used_rows = {row for row, _ in matches}
+        used_detections = {detection for _, detection in matches}
+        rows = [
+            row
+            for row, track in enumerate(active)
+            if row not in used_rows and np.linalg.norm(track.embedding) > 1e-6
+        ]
+        detections = [
+            detection for detection in range(len(embeddings)) if detection not in used_detections
+        ]
+        if not rows or not detections:
+            return []
+
+        similarity = np.stack(
+            [_cosine_similarity(active[row].embedding, embeddings[detections]) for row in rows]
+        )
+        row_best = np.argmax(similarity, axis=1)
+        detection_best = np.argmax(similarity, axis=0)
+        recovered: list[tuple[int, int]] = []
+        for local_row, local_detection in enumerate(row_best):
+            if int(detection_best[local_detection]) != local_row:
+                continue
+            score = float(similarity[local_row, local_detection])
+            row_scores = np.sort(similarity[local_row])[::-1]
+            detection_scores = np.sort(similarity[:, local_detection])[::-1]
+            row_margin = (
+                float("inf") if len(row_scores) == 1 else float(row_scores[0] - row_scores[1])
+            )
+            detection_margin = (
+                float("inf")
+                if len(detection_scores) == 1
+                else float(detection_scores[0] - detection_scores[1])
+            )
+            if (
+                score >= self.appearance_recovery_threshold
+                and row_margin >= self.appearance_recovery_margin
+                and detection_margin >= self.appearance_recovery_margin
+            ):
+                recovered.append((rows[local_row], detections[int(local_detection)]))
+        return recovered
 
     def update(
         self,
@@ -182,6 +283,8 @@ class HarmonicMeanTracker:
             similarity = np.zeros((len(active), len(boxes)), dtype=np.float32)
             for row, track in enumerate(active):
                 elapsed = max(0, frame_index - track.last_frame)
+                if elapsed > self.max_geometry_lost_frames:
+                    continue
                 predicted_bbox = track.bbox + track.velocity * elapsed
                 geometry = _eiou_similarity(predicted_bbox, boxes)
                 if embeddings is None or np.linalg.norm(track.embedding) <= 1e-6:
@@ -205,9 +308,11 @@ class HarmonicMeanTracker:
                 for row, column in zip(rows, columns, strict=True)
                 if float(similarity[row, column]) >= self.match_threshold
             ]
+        matches.extend(self._appearance_recovery_matches(active, embeddings, matches))
 
         previously_visible = self._visible_track_ids
         used_detections: set[int] = set()
+        detection_track_ids: dict[int, int] = {}
         output: list[_TrackedDetection] = []
         visible_track_ids: set[int] = set()
         for row, detection_index in matches:
@@ -228,6 +333,7 @@ class HarmonicMeanTracker:
             track.score = float(scores[detection_index])
             track.last_frame = frame_index
             used_detections.add(detection_index)
+            detection_track_ids[detection_index] = track.track_id
             visible_track_ids.add(track.track_id)
             output.append(
                 _TrackedDetection(
@@ -254,6 +360,7 @@ class HarmonicMeanTracker:
                 velocity=np.zeros(4, dtype=np.float32),
             )
             self._tracks[track.track_id] = track
+            detection_track_ids[detection_index] = track.track_id
             visible_track_ids.add(track.track_id)
             self._next_id += 1
             output.append(
@@ -264,6 +371,13 @@ class HarmonicMeanTracker:
                     track.score,
                 )
             )
+        self._observe_reid_frame(
+            frame_index=frame_index,
+            boxes=boxes,
+            scores=scores,
+            embeddings=embeddings,
+            detection_track_ids=detection_track_ids,
+        )
         for track_id in previously_visible - visible_track_ids:
             track = self._tracks.get(track_id)
             if track is None:
@@ -282,6 +396,17 @@ class HarmonicMeanTracker:
             )
         self._visible_track_ids = visible_track_ids
         return output
+
+    def reid_feature_snapshot(
+        self,
+        embedding_model: ReIdEmbeddingModel,
+    ) -> ReIdFeatureSnapshot:
+        """Return the versioned compact feature state for this tracker run."""
+        return ReIdFeatureSnapshot(
+            schema_version="1.0.0",
+            embedding_model=embedding_model,
+            features=self._reid_features.snapshot(),
+        )
 
     def predict(self, frame_index: int) -> list[_TrackedDetection]:
         """Extrapolate active boxes between detector frames without changing identity state."""
@@ -385,14 +510,14 @@ class Rtv4X3DObservationProvider:
         detector_threshold: float = 0.4,
         detector_input_scale: float = 1.0,
         reid_every: int = 1,
-        court_model: str | Path | None = "v1",
-        court_imgsz: int = 640,
-        court_batch_size: int = 8,
+        court_model: str | Path | None = "v3",
+        court_imgsz: int = 512,
+        court_batch_size: int = 16,
         court_layout_every: int = 1,
         court_refresh_every: int = 120,
         court_track_every: int = 1,
         court_max_hold_frames: int = 180,
-        court_decoder: str = "cuda",
+        court_decoder: str = "auto",
         disable_amp: bool = False,
     ) -> None:
         paths.validate()
@@ -422,6 +547,7 @@ class Rtv4X3DObservationProvider:
         self._detector_frame_tensor: Any = None
         self._osnet_mean: Any = None
         self._osnet_std: Any = None
+        self._reid_embedding_model: ReIdEmbeddingModel | None = None
         self._court_estimator: CourtLineEstimator | None = None
         self._effective_backend = backend
 
@@ -429,6 +555,11 @@ class Rtv4X3DObservationProvider:
     def effective_backend(self) -> str:
         """Return the actually loaded X3D backend after compatibility fallback."""
         return self._effective_backend
+
+    def _embedding_model_metadata(self) -> ReIdEmbeddingModel:
+        if self._reid_embedding_model is None:
+            self._reid_embedding_model = sports_osnet_embedding_model(self.paths.osnet_checkpoint)
+        return self._reid_embedding_model
 
     def infer(
         self,
@@ -442,6 +573,10 @@ class Rtv4X3DObservationProvider:
         load_seconds = perf_counter() - load_started
         if self._court_estimator is None:
             raise RuntimeError("court-line estimator was not initialized")
+        # Every clip is an independent temporal sequence. A persistent worker or batch
+        # offline runner reuses model weights, but must never reuse X3D frame history.
+        self._streamer.clean_state()
+        self._detector_frame_tensor = None
         capture = cv2.VideoCapture(str(clip_path))
         if not capture.isOpened():
             raise ValueError(f"cannot open canonical clip: {clip_path}")
@@ -449,7 +584,10 @@ class Rtv4X3DObservationProvider:
         height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
         fps = float(capture.get(cv2.CAP_PROP_FPS))
         expected_frames = int(job.clip.video.total_frames)
-        tracker = HarmonicMeanTracker(max_lost_frames=max(60, round(fps * 2.0)))
+        tracker = HarmonicMeanTracker(
+            max_lost_frames=max(60, round(fps * 12.0)),
+            max_geometry_lost_frames=max(60, round(fps * 2.0)),
+        )
         ball_tracker = BallTrajectoryTracker()
         players: dict[int, tuple[PlayerObservation, ...]] = {}
         courts: dict[int, CourtFrame] = {}
@@ -518,6 +656,7 @@ class Rtv4X3DObservationProvider:
             frame_width=width,
             frame_height=height,
             fps=fps,
+            reid_feature_snapshot=tracker.reid_feature_snapshot(self._embedding_model_metadata()),
             metadata={
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
@@ -525,8 +664,8 @@ class Rtv4X3DObservationProvider:
                 "detector_input_size": list(self._input_size),
                 "detector_input_scale": self.detector_input_scale,
                 "reid_every": self.reid_every,
-                "tracker": "harmonic-mean-eiou+OSNet+court-reentry",
-                "court_detector": "court-line-yolo26n-v3+pose36-layout-tracker",
+                "tracker": "harmonic-mean-eiou+OSNet-run-local",
+                "court_detector": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
                 "court_model": self._court_estimator.model_name,
                 "streaming_backend": self._effective_backend,
                 "source": "canonical_clip_inference",
@@ -607,6 +746,7 @@ class Rtv4X3DObservationProvider:
             device,
             checkpoint=str(self.paths.osnet_checkpoint),
         )
+        self._embedding_model_metadata()
         self._roi_align = importlib.import_module("torchvision.ops").roi_align
         self._osnet_mean = torch.tensor(
             [0.485, 0.456, 0.406], device=device, dtype=torch.float32

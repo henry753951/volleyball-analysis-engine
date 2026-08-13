@@ -25,13 +25,14 @@ def associate(
     anchor: int,
     players: dict[int, tuple[PlayerObservation, ...]],
     actions: dict[tuple[int, int], ActionObservation],
+    ball_position: tuple[float, float] = (0.50, 0.45),
 ) -> HitAssociation:
     return associate_hit(
         anchor_frame=anchor,
         previous_anchor_frame=0,
         next_anchor_frame=30,
         is_terminal=False,
-        balls={frame: BallObservation(frame, (0.50, 0.45), 0.95) for frame in range(1, 30)},
+        balls={frame: BallObservation(frame, ball_position, 0.95) for frame in range(1, 30)},
         players=players,
         actions=actions,
         frame_width=1920,
@@ -77,3 +78,15 @@ def test_spatial_fallback_searches_symmetrically_before_anchor() -> None:
     assert result.player.source_track_id == 4
     assert result.observation_frame == 7
     assert result.mode == "nearby_player_frames_at_fixed_hit_ball"
+
+
+def test_setting_action_does_not_validate_a_ball_near_the_players_feet() -> None:
+    result = associate(
+        anchor=10,
+        players={10: (player(10, 5),)},
+        actions={(10, 5): ActionObservation(10, 5, "setting", 0.95)},
+        ball_position=(0.50, 0.82),
+    )
+
+    assert result.player is not None
+    assert result.mode == "direct_hit_ball_iou"

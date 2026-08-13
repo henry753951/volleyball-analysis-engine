@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.5.3+orientation-locked-court"
+    provider_build_id: str = "volleyball-analysis-engine/0.6.0+reid-bank-court-v3-majority"
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"
@@ -30,14 +30,14 @@ class Settings(BaseSettings):
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     detector_input_scale: float = Field(default=1.0, ge=0.5, le=1.0)
     reid_every: int = Field(default=1, ge=1, le=30)
-    court_model: str = "v1"
-    court_imgsz: int = Field(default=640, ge=320, le=2048)
+    court_model: str = "v3"
+    court_imgsz: int = Field(default=512, ge=320, le=2048)
     court_batch_size: int = Field(default=16, ge=1, le=64)
     court_layout_every: int = Field(default=1, ge=1, le=600)
     court_refresh_every: int = Field(default=120, ge=1, le=600)
     court_track_every: int = Field(default=1, ge=1, le=30)
     court_max_hold_frames: int = Field(default=180, ge=0, le=600)
-    court_decoder: Literal["auto", "spatial", "cuda"] = "cuda"
+    court_decoder: Literal["auto", "spatial", "cuda"] = "auto"
     prewarm_models: bool = True
     write_debug_artifacts: bool = False
     disable_amp: bool = False

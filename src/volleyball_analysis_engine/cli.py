@@ -15,7 +15,7 @@ import cv2
 import orjson
 from volleyball_monitoring_ai import (
     AIJobRequest,
-    AnalysisBundle,
+    AnalysisDataBundle,
     OfflineProgressReporter,
     OfflineRunner,
 )
@@ -79,7 +79,7 @@ async def _run_offline(settings: Settings, arguments: argparse.Namespace) -> Non
         job: AIJobRequest,
         clip_path: Path,
         report: OfflineProgressReporter,
-    ) -> AnalysisBundle:
+    ) -> AnalysisDataBundle:
         return pipeline.analyze(
             job,
             clip_path,

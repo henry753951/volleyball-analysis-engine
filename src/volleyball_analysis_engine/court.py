@@ -35,7 +35,7 @@ COURT_WORLD_POINTS = (
     (0.0, 9.0),
 )
 POSE36_POINT_COUNT = 36
-FULL_SEARCH_RECOVERY_AFTER = 5
+POSE36_KEYPOINT_IDS = tuple(range(POSE36_POINT_COUNT))
 MAXIMUM_LAYOUT_JUMP_RATIO = 0.12
 ORIENTATION_MARGIN_RATIO = 0.04
 MINIMUM_LAYOUT_COMPARISON_POINTS = 4
@@ -163,7 +163,7 @@ class CourtLineEstimator:
         max_hold_frames: int,
     ) -> None:
         """Load one verified court model for reuse across clips."""
-        self.model_name = str(model or "v1")
+        self.model_name = str(model or "v3")
         self.batch_size = max(1, batch_size)
         self.layout_every = max(1, layout_every)
         self.refresh_every = max(self.layout_every, refresh_every)
@@ -175,7 +175,7 @@ class CourtLineEstimator:
             image_size=image_size,
             decoder=decoder,
             half=True,
-            include_layout=False,
+            include_layout=True,
         )
 
     def warmup(self) -> None:
@@ -224,7 +224,6 @@ class CourtVideoProcessor:
         self._pending: list[tuple[int, NDArray[np.uint8]]] = []
         self._last_reliable_layout: CourtLayout | None = None
         self._output_orientation = "identity"
-        self._consecutive_match_misses = 0
         self.timing = CourtTiming()
 
     def submit(
@@ -244,14 +243,12 @@ class CourtVideoProcessor:
         layout = None
         if should_infer:
             started = perf_counter()
-            result = self._model.predict(frame, include_layout=False)
+            result = self._model.predict(frame, include_layout=True)
             self.timing.model_seconds += perf_counter() - started
             self.timing.batches += 1
             self.timing.inference_frames += 1
-            started = perf_counter()
             self.timing.layout_attempts += 1
-            layout = self._model.attach_layout(result).layout
-            self.timing.layout_seconds += perf_counter() - started
+            layout = self._accepted_layout(result.layout)
 
         should_track = layout is not None or frame_index % self._track_every == 0
         if should_track:
@@ -265,6 +262,8 @@ class CourtVideoProcessor:
             self.timing.tracking_seconds += perf_counter() - started
         else:
             tracked = self._tracker.current
+        if should_infer and layout is None:
+            return {}
         court = self._court_frame(frame_index, tracked)
         if court is None:
             return {}
@@ -283,7 +282,7 @@ class CourtVideoProcessor:
         self._pending = []
         frames = [frame for _, frame in pending]
         started = perf_counter()
-        results = self._model.predict_many(frames, include_layout=False)
+        results = self._model.predict_many(frames, include_layout=True)
         self.timing.model_seconds += perf_counter() - started
         self.timing.batches += 1
         self.timing.inference_frames += len(pending)
@@ -302,20 +301,8 @@ class CourtVideoProcessor:
         result: CourtFrameResult,
     ) -> CourtFrame | None:
         prior = self._last_reliable_layout or self._tracker.current
-        candidate = self._attach_layout(result, prior_layout=prior)
-        if candidate is None or candidate.status != "ok":
-            self._consecutive_match_misses += 1
-            if prior is not None and self._consecutive_match_misses >= FULL_SEARCH_RECOVERY_AFTER:
-                recovered = self._attach_layout(result, prior_layout=None)
-                if recovered is not None and recovered.status == "ok":
-                    candidate = recovered
-                    self._tracker.reset()
-                    self._consecutive_match_misses = 0
-                    self.timing.recovery_layouts += 1
-        else:
-            self._consecutive_match_misses = 0
-
-        accepted = candidate if candidate is not None and candidate.status == "ok" else None
+        self.timing.layout_attempts += 1
+        accepted = self._accepted_layout(result.layout)
         if accepted is not None and prior is None:
             self._output_orientation = self._screen_canonical_orientation(accepted)
         if accepted is not None and prior is not None:
@@ -347,23 +334,21 @@ class CourtVideoProcessor:
             self._last_reliable_layout = accepted or tracked
         return court
 
-    def _attach_layout(
-        self,
-        result: CourtFrameResult,
-        *,
-        prior_layout: CourtLayout | None,
-    ) -> CourtLayout | None:
-        started = perf_counter()
-        self.timing.layout_attempts += 1
-        layout = self._model.attach_layout(result, prior_layout=prior_layout).layout
-        self.timing.layout_seconds += perf_counter() - started
-        if layout is not None:
-            if layout.matcher_mode == "prior_refined":
-                self.timing.prior_refined_matches += 1
-            elif layout.matcher_mode == "full_search":
-                self.timing.full_search_matches += 1
-            if layout.status != "ok":
-                self.timing.layout_abstentions += 1
+    def _accepted_layout(self, layout: CourtLayout | None) -> CourtLayout | None:
+        """Accept only an explicit, complete Pose36 layout from the current frame."""
+        if layout is None:
+            self.timing.rejected_layouts += 1
+            return None
+        if layout.status != "ok":
+            self.timing.layout_abstentions += 1
+            self.timing.rejected_layouts += 1
+            return None
+        if (
+            len(layout.keypoints) != POSE36_POINT_COUNT
+            or tuple(sorted(point.id for point in layout.keypoints)) != POSE36_KEYPOINT_IDS
+        ):
+            self.timing.rejected_layouts += 1
+            return None
         return layout
 
     def _track(

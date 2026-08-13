@@ -24,13 +24,22 @@ def capabilities(settings: Settings) -> ProviderCapabilities:
     """Declare the exact contract versions and temporary optional outputs."""
     return ProviderCapabilities.model_validate(
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "provider_name": "volleyball-analysis-engine",
             "provider_build_id": settings.provider_build_id,
-            "supported_job_schema_versions": ["1.1.0"],
-            "supported_result_schema_versions": ["1.0.0"],
-            "supported_overlay_formats": ["flatbuffers_v1"],
-            "optional_extensions": {"action": True, "group_phase": False, "confidence": True},
+            "supported_job_schema_versions": ["3.0.0"],
+            "supported_analysis_data_versions": ["1.0.0"],
+            "supported_analysis_modules": ["court", "tracking", "reid", "contacts"],
+            # The current pipeline always recomputes one complete AnalysisData
+            # payload. Do not advertise module reuse until source AnalysisData
+            # is actually consumed and merged by the worker.
+            "supports_selective_rerun": False,
+            "optional_extensions": {
+                "action": True,
+                "group_phase": False,
+                "confidence": True,
+                "reid_feature_bank": True,
+            },
             "action_taxonomies": [
                 {
                     "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",

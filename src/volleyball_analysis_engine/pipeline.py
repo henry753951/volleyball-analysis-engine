@@ -14,9 +14,9 @@ import numpy as np
 from numpy.typing import NDArray
 from volleyball_monitoring_ai import (
     AIJobRequest,
-    AnalysisBundle,
-    AnalysisResult,
-    build_tracking_overlay,
+    AnalysisDataBundle,
+    AnalysisDomainData,
+    build_analysis_data,
     validate_passthrough,
 )
 from volleyball_monitoring_ai.models import KeyPointInput
@@ -33,7 +33,7 @@ from .records import (
     FrameObservation,
     PlayerObservation,
 )
-from .reid import CourtPositionReidentifier
+from .reid_features import build_reid_feature_bank, resolve_track_court_sides
 
 ProgressReporter = Callable[[float, str], None]
 
@@ -44,10 +44,9 @@ def _noop_progress(_progress: float, _stage: str) -> None:
 
 @dataclass(frozen=True, slots=True)
 class PipelineConfig:
-    """Geometry and identity thresholds independent of a specific model backend."""
+    """Geometry and association thresholds independent of a specific model backend."""
 
     court_confidence_threshold: float = 0.25
-    reid_max_distance: float = 0.35
     association_search_seconds: float = 0.25
 
 
@@ -65,9 +64,9 @@ class _EventSpec:
 
 
 class AnalysisPipeline:
-    """Produce contract-valid result and overlay artifacts for an incoming job."""
+    """Produce one contract-valid AnalysisData artifact for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-reid-contact-proposals-0.5.0"
+    analysis_version = "rtv4-x3d-court-reid-physics-contact-0.6.0"
 
     def __init__(
         self,
@@ -90,7 +89,7 @@ class AnalysisPipeline:
         clip_path: Path,
         report: ProgressReporter | None = None,
         artifact_dir: Path | None = None,
-    ) -> AnalysisBundle:
+    ) -> AnalysisDataBundle:
         """Analyze one canonical clip while preserving every immutable anchor."""
         reporter: ProgressReporter = report or _noop_progress
         inferred = self.provider.infer(clip_path, job, reporter)
@@ -112,15 +111,20 @@ class AnalysisPipeline:
         balls = self._map_balls(inferred.balls, source_last_frame, destination_frames)
         actions = self._map_actions(inferred.actions, source_last_frame, destination_frames)
 
-        reporter(0.76, "court_reidentification")
-        frames = CourtPositionReidentifier(
-            max_per_side=6,
-            max_distance=self.config.reid_max_distance,
-        ).apply(frames)
+        reporter(0.76, "reid_feature_bank")
+        reid_feature_bank = build_reid_feature_bank(
+            inferred.reid_feature_snapshot,
+            frames,
+            map_frame=lambda frame_index: self._map_frame(
+                frame_index,
+                source_last_frame,
+                destination_frames,
+            ),
+        )
         players_by_frame = {frame.frame_index: frame.players for frame in frames}
 
         reporter(0.82, "hit_association")
-        events = self._build_events(
+        events, contact_suggestions = self._build_events(
             job,
             balls,
             players_by_frame,
@@ -137,9 +141,9 @@ class AnalysisPipeline:
         unresolved = sum(
             event["association_state"] in {"ambiguous", "unresolved"} for event in events
         )
-        result = AnalysisResult.model_validate(
+        domain = AnalysisDomainData.model_validate(
             {
-                "schema_version": "1.1.0",
+                "schema_version": "1.0.0",
                 "analysis_id": analysis_id,
                 "analysis_version": self.analysis_version,
                 "ai_job_id": job.ai_job_id,
@@ -167,24 +171,26 @@ class AnalysisPipeline:
                 },
                 "extensions": {
                     "inference_source": "canonical_clip",
-                    "court_detection": "court-line-yolo26n-v3+pose36-layout-tracker",
+                    "court_detection": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
                     "tracking": "harmonic-mean-eiou+OSNet",
-                    "reid": "nearest-reentry-in-unclamped-2d-court-space",
+                    "reid": "clip-local-sports-osnet-feature-bank-v1",
+                    "reid_feature_bank": reid_feature_bank,
                     "action_source": "RT-DETRv4-X3D",
                     "provider_metadata": inferred.metadata,
+                    "contact_suggestions": contact_suggestions,
                     "decoded_source_frame_count": source_last_frame + 1,
                     "canonical_frame_count": destination_frames,
                 },
             }
         )
-        validate_passthrough(job, result)
+        validate_passthrough(job, domain)
         if artifact_dir is not None:
             reporter(0.91, "writing_visual_v5_artifacts")
             write_inference_artifacts(
                 output_dir=artifact_dir,
                 clip_path=clip_path,
                 job=job,
-                result=result,
+                domain=domain,
                 frames=frames,
                 balls=balls,
                 courts=inferred.courts,
@@ -193,11 +199,10 @@ class AnalysisPipeline:
                 frame_width=inferred.frame_width,
                 frame_height=inferred.frame_height,
             )
-        overlay = build_tracking_overlay(
+        analysis_data = build_analysis_data(
             job,
-            analysis_id=analysis_id,
-            analysis_version=self.analysis_version,
-            frame_records=self._overlay_records(frames, actions),
+            domain=domain,
+            frame_records=self._analysis_frame_records(frames, actions),
             ball_positions={
                 frame_index: {
                     "x": ball.frame_pos[0],
@@ -206,7 +211,7 @@ class AnalysisPipeline:
                 }
                 for frame_index, ball in balls.items()
             },
-            court_keypoints=self._overlay_court_keypoints(
+            court_keypoints=self._analysis_court_keypoints(
                 inferred.courts,
                 source_last_frame=source_last_frame,
                 destination_frames=destination_frames,
@@ -216,8 +221,8 @@ class AnalysisPipeline:
             action_taxonomy_id="volleyball-analysis-engine.rtv4-x3d-actions",
             action_taxonomy_version="1",
         )
-        reporter(0.98, "analysis_bundle_ready")
-        return AnalysisBundle(result=result, overlay_bytes=overlay)
+        reporter(0.98, "analysis_data_ready")
+        return AnalysisDataBundle(domain=domain, analysis_data_bytes=analysis_data)
 
     def _project_frames(
         self,
@@ -335,7 +340,7 @@ class AnalysisPipeline:
         actions: dict[tuple[int, int], ActionObservation],
         frame_width: int,
         frame_height: int,
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         events: list[dict[str, Any]] = []
         total_frames = int(job.clip.video.total_frames)
         fps = int(job.clip.video.fps.num) / int(job.clip.video.fps.den)
@@ -354,22 +359,30 @@ class AnalysisPipeline:
             )
             for point in job.key_points
         ]
-        first_anchor = min(int(point.clip_frame_index) for point in job.key_points)
-        last_anchor = max(int(point.clip_frame_index) for point in job.key_points)
-        proposals = detect_contact_proposals(
-            balls,
-            start_frame=first_anchor,
-            end_frame=last_anchor,
-            fps=fps,
-            protected_frames={int(point.clip_frame_index) for point in job.key_points},
+        if job.boundaries:
+            first_anchor = int(job.boundaries[0].clip_frame_index)
+            last_anchor = int(job.boundaries[-1].clip_frame_index)
+        else:
+            first_anchor = min(int(point.clip_frame_index) for point in job.key_points)
+            last_anchor = max(int(point.clip_frame_index) for point in job.key_points)
+        proposals = (
+            []
+            if human_specs
+            else detect_contact_proposals(
+                balls,
+                start_frame=first_anchor,
+                end_frame=last_anchor,
+                fps=fps,
+                protected_frames=set(),
+            )
         )
-        specs = human_specs + [
+        proposal_specs = [
             _EventSpec(
                 anchor=proposal.frame_index,
                 key_point_id=str(
                     uuid5(
                         NAMESPACE_URL,
-                        f"volleyball-contact:{job.rally_submission_id}:{proposal.frame_index}:v1",
+                        f"volleyball-contact:{job.rally_submission_id}:{proposal.frame_index}:v2",
                     )
                 ),
                 source_key_point_id=None,
@@ -379,14 +392,74 @@ class AnalysisPipeline:
                 detection_confidence=proposal.confidence,
                 point=None,
                 detection={
-                    "method": "ball_trajectory_change_v1",
+                    "method": "piecewise_ball_flight_v2",
                     "direction_change": proposal.direction_change,
                     "acceleration": proposal.acceleration,
                     "speed_ratio": proposal.speed_ratio,
+                    "model_improvement": proposal.model_improvement,
+                    "prediction_error": proposal.prediction_error,
                 },
             )
             for proposal in proposals
         ]
+        human_anchors = sorted(spec.anchor for spec in human_specs)
+        contact_suggestions: list[dict[str, Any]] = []
+        validated_proposal_ids: set[str] = set()
+        for spec in proposal_specs:
+            previous_anchor = max(
+                (anchor for anchor in human_anchors if anchor < spec.anchor),
+                default=-1,
+            )
+            next_anchor = min(
+                (anchor for anchor in human_anchors if anchor > spec.anchor),
+                default=total_frames,
+            )
+            association = associate_hit(
+                anchor_frame=spec.anchor,
+                previous_anchor_frame=previous_anchor,
+                next_anchor_frame=next_anchor,
+                is_terminal=False,
+                balls=balls,
+                players=players,
+                actions=actions,
+                frame_width=frame_width,
+                frame_height=frame_height,
+                action_search_radius=action_search_radius,
+            )
+            actor = self._actor(
+                association.player,
+                association.observation_frame,
+                association.confidence,
+            )
+            validated = actor is not None
+            if validated:
+                validated_proposal_ids.add(spec.key_point_id)
+            contact_suggestions.append(
+                {
+                    "frame_index": str(spec.anchor),
+                    "confidence": spec.detection_confidence,
+                    "marker_kind": spec.marker_kind,
+                    "validation_state": (
+                        "player_contact_supported" if validated else "trajectory_only"
+                    ),
+                    "resolved_frame_index": (
+                        None
+                        if association.observation_frame is None
+                        else str(association.observation_frame)
+                    ),
+                    "association_mode": association.mode,
+                    "association_confidence": association.confidence,
+                    "actor": actor,
+                    "detection": spec.detection,
+                }
+            )
+        validated_proposals = [
+            spec for spec in proposal_specs if spec.key_point_id in validated_proposal_ids
+        ]
+        # An explicit contact list is an operator override. Boundary-only jobs
+        # receive physics proposals; jobs carrying any preserved/manual contact
+        # keep that exact sequence and do not silently add new AI contacts.
+        specs = human_specs or validated_proposals
         specs.sort(key=lambda item: (item.anchor, item.anchor_origin != "human_anchor"))
         for index, spec in enumerate(specs):
             anchor = spec.anchor
@@ -484,7 +557,7 @@ class AnalysisPipeline:
                     ),
                 }
             )
-        return events
+        return events, contact_suggestions
 
     @staticmethod
     def _nearest_action(
@@ -572,6 +645,7 @@ class AnalysisPipeline:
 
     @staticmethod
     def _build_tracks(frames: list[FrameObservation]) -> list[dict[str, Any]]:
+        court_sides = resolve_track_court_sides(frames)
         observations: dict[int, list[PlayerObservation]] = defaultdict(list)
         for frame in frames:
             for player in frame.players:
@@ -579,17 +653,13 @@ class AnalysisPipeline:
         tracks: list[dict[str, Any]] = []
         for track_id, players in sorted(observations.items()):
             frames_seen = [player.frame_index for player in players]
-            side_counts: dict[str, int] = defaultdict(int)
-            for player in players:
-                side_counts[player.court_side] += 1
-            court_side = max(side_counts, key=side_counts.__getitem__, default="unknown")
             confidence_values = [
                 player.confidence for player in players if player.confidence is not None
             ]
             tracks.append(
                 {
                     "track_id": track_id,
-                    "court_side": court_side,
+                    "court_side": court_sides[track_id],
                     "first_frame_index": str(min(frames_seen)),
                     "last_frame_index": str(max(frames_seen)),
                     "mean_confidence": (
@@ -598,7 +668,8 @@ class AnalysisPipeline:
                         else sum(confidence_values) / len(confidence_values)
                     ),
                     "metadata": {
-                        "reid_basis": "2d_court_position",
+                        "reid_basis": "run_local_tracker_id",
+                        "reid_feature_bank": "1.0.0",
                         "source_track_ids": sorted({player.source_track_id for player in players}),
                     },
                 }
@@ -630,7 +701,7 @@ class AnalysisPipeline:
         return paths
 
     @staticmethod
-    def _overlay_records(
+    def _analysis_frame_records(
         frames: list[FrameObservation],
         actions: dict[tuple[int, int], ActionObservation],
     ) -> list[dict[str, Any]]:
@@ -674,7 +745,7 @@ class AnalysisPipeline:
         ]
 
     @classmethod
-    def _overlay_court_keypoints(
+    def _analysis_court_keypoints(
         cls,
         courts: dict[int, CourtFrame],
         *,

@@ -4,10 +4,26 @@ import numpy as np
 
 from volleyball_analysis_engine.records import CourtFrame, CourtKeypoint
 from volleyball_analysis_engine.visual_v5 import (
+    _action_states_for_frame,  # pyright: ignore[reportPrivateUsage]
     _draw_court_keypoints,  # pyright: ignore[reportPrivateUsage]
     path_scroll_offset,
     preview_frame_indices,
 )
+
+
+def test_action_highlight_uses_contact_anchor_not_actor_observation_frame() -> None:
+    events = [
+        {
+            "anchor_frame_index": "20",
+            "resolved_frame_index": "16",
+            "actors": [{"track_id": "7", "action": {"label": "setting"}}],
+        }
+    ]
+
+    assert _action_states_for_frame(events, frame_index=16, fps=30.0) == {}
+    assert _action_states_for_frame(events, frame_index=20, fps=30.0) == {
+        7: ("setting", True)
+    }
 
 
 def test_preview_frames_match_contract_lab_visual_milestones() -> None:

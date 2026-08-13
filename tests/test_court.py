@@ -1,14 +1,18 @@
 """Frame completeness tests for batched court-line inference."""
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
+import pytest
 from volley_court import CourtKeypoint as ModelCourtKeypoint
 from volley_court import CourtLayout, CourtLineModel
 
+from volleyball_analysis_engine.config import Settings
 from volleyball_analysis_engine.court import (
     POSE36_CANONICAL_POINTS,
+    CourtLineEstimator,
     CourtVideoProcessor,
     interpolate_short_court_gaps,
 )
@@ -18,10 +22,13 @@ from volleyball_analysis_engine.records import CourtFrame, CourtKeypoint
 class FakeCourtModel:
     """Record every frame passed through the batched model boundary."""
 
-    def __init__(self) -> None:
+    def __init__(self, layouts: list[CourtLayout] | None = None) -> None:
         """Initialize call counters."""
         self.batch_sizes: list[int] = []
+        self.frame_markers: list[list[int]] = []
+        self.include_layout_calls: list[bool] = []
         self.attach_count = 0
+        self._layouts = list(layouts or [])
 
     def predict_many(
         self,
@@ -29,19 +36,31 @@ class FakeCourtModel:
         *,
         include_layout: bool,
     ) -> list[SimpleNamespace]:
-        """Return one empty layout result for every supplied frame."""
-        assert include_layout is False
+        """Return one direct layout result for every supplied frame."""
+        assert include_layout is True
         self.batch_sizes.append(len(frames))
-        return [SimpleNamespace(layout=self._empty_layout()) for _ in frames]
+        self.frame_markers.append([int(frame[0, 0, 0]) for frame in frames])
+        self.include_layout_calls.append(include_layout)
+        layouts = [
+            self._layouts.pop(0) if self._layouts else self._empty_layout()
+            for _ in frames
+        ]
+        return [SimpleNamespace(layout=layout) for layout in layouts]
+
+    def predict(
+        self,
+        frame: np.ndarray[Any, Any],
+        *,
+        include_layout: bool,
+    ) -> SimpleNamespace:
+        """Return one direct layout through the single-frame 0.3 API."""
+        return self.predict_many([frame], include_layout=include_layout)[0]
 
     def attach_layout(
         self,
         result: SimpleNamespace,
-        *,
-        prior_layout: CourtLayout | None = None,
     ) -> SimpleNamespace:
-        """Record layout fitting attempts."""
-        del prior_layout
+        """Expose the 0.3 signature and prove direct layouts are not reattached."""
         self.attach_count += 1
         return result
 
@@ -60,8 +79,38 @@ class FakeCourtModel:
         )
 
 
+def _layout(
+    *,
+    status: str = "ok",
+    point_count: int = 36,
+    shift: float = 0.0,
+) -> CourtLayout:
+    points = tuple(
+        ModelCourtKeypoint(
+            index,
+            10.0 * y + 100.0 + shift,
+            10.0 * x + 50.0,
+            0.9,
+            True,
+            "test",
+        )
+        for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS[:point_count])
+    )
+    return CourtLayout(
+        status=cast("Any", status),
+        score=0.9,
+        reason="test",
+        keypoints=points,
+        candidate_keypoints=points,
+        matched_line_count=7,
+        hypothesis_margin=0.5,
+        semantic_alignment=1.0,
+        homography=((0.0, 10.0, 100.0), (10.0, 0.0, 50.0), (0.0, 0.0, 1.0)),
+    )
+
+
 def test_full_frame_court_batches_do_not_drop_partial_tail() -> None:
-    model = FakeCourtModel()
+    model = FakeCourtModel([_layout(), _layout(), _layout()])
     processor = CourtVideoProcessor(
         cast("CourtLineModel", model),
         batch_size=2,
@@ -70,20 +119,143 @@ def test_full_frame_court_batches_do_not_drop_partial_tail() -> None:
         track_every=1,
         max_hold_frames=30,
     )
-    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    frames = [np.full((240, 360, 3), marker, dtype=np.uint8) for marker in (4, 8, 15)]
 
-    assert processor.submit(0, frame) == {}
-    assert processor.submit(1, frame) == {}
-    assert processor.submit(2, frame) == {}
-    assert processor.finish() == {}
+    assert processor.submit(41, frames[0]) == {}
+    first_batch = processor.submit(7, frames[1])
+    assert list(first_batch) == [41, 7]
+    assert [court.frame_index for court in first_batch.values()] == [41, 7]
+    assert processor.submit(99, frames[2]) == {}
+    tail = processor.finish()
+    assert list(tail) == [99]
+    assert tail[99].frame_index == 99
 
     assert model.batch_sizes == [2, 1]
-    assert model.attach_count == 3
+    assert model.frame_markers == [[4, 8], [15]]
+    assert model.include_layout_calls == [True, True]
+    assert model.attach_count == 0
     assert processor.timing.source_frames == 3
     assert processor.timing.inference_frames == 3
     assert processor.timing.layout_attempts == 3
     assert processor.timing.batches == 2
     assert processor.max_hold_frames == 120
+
+
+@pytest.mark.parametrize("status", ["ambiguous", "abstained"])
+def test_non_ok_layout_status_is_never_accepted(status: str) -> None:
+    model = FakeCourtModel([_layout(status=status)])
+    processor = CourtVideoProcessor(
+        cast("CourtLineModel", model),
+        batch_size=1,
+        layout_every=1,
+        refresh_every=120,
+        track_every=1,
+        max_hold_frames=30,
+    )
+
+    assert processor.submit(5, np.zeros((240, 360, 3), dtype=np.uint8)) == {}
+    assert processor.timing.accepted_frames == 0
+    assert processor.timing.rejected_layouts == 1
+    assert processor.timing.layout_abstentions == 1
+
+
+def test_non_ok_sparse_refresh_does_not_render_the_held_layout() -> None:
+    model = FakeCourtModel([_layout(), _layout(status="ambiguous")])
+    processor = CourtVideoProcessor(
+        cast("CourtLineModel", model),
+        batch_size=16,
+        layout_every=2,
+        refresh_every=2,
+        track_every=1,
+        max_hold_frames=30,
+    )
+    frame = np.zeros((240, 360, 3), dtype=np.uint8)
+
+    assert list(processor.submit(0, frame)) == [0]
+    assert list(processor.submit(1, frame)) == [1]
+    assert processor.submit(2, frame) == {}
+    assert processor.timing.accepted_frames == 2
+    assert processor.timing.rejected_layouts == 1
+
+
+def test_ok_layout_requires_all_36_pose_keypoints() -> None:
+    duplicate_id = _layout()
+    duplicate_id = replace(
+        duplicate_id,
+        keypoints=(*duplicate_id.keypoints[:-1], replace(duplicate_id.keypoints[-1], id=0)),
+    )
+    model = FakeCourtModel([_layout(point_count=35), duplicate_id, _layout()])
+    processor = CourtVideoProcessor(
+        cast("CourtLineModel", model),
+        batch_size=3,
+        layout_every=1,
+        refresh_every=120,
+        track_every=1,
+        max_hold_frames=30,
+    )
+    frame = np.zeros((240, 360, 3), dtype=np.uint8)
+
+    assert processor.submit(20, frame) == {}
+    assert processor.submit(21, frame) == {}
+    output = processor.submit(22, frame)
+
+    assert list(output) == [22]
+    assert len(output[22].keypoints) == 36
+    assert processor.timing.accepted_frames == 1
+    assert processor.timing.rejected_layouts == 2
+
+
+def test_v3_defaults_and_v2_environment_rollback_use_direct_layout_api(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str | None, dict[str, object]]] = []
+
+    def from_pretrained(
+        model: str | None = None,
+        **config: object,
+    ) -> CourtLineModel:
+        calls.append((model, config))
+        return cast("CourtLineModel", FakeCourtModel())
+
+    monkeypatch.delenv("VOLLYAI_COURT_MODEL", raising=False)
+    monkeypatch.delenv("VOLLYAI_COURT_IMGSZ", raising=False)
+    monkeypatch.delenv("VOLLYAI_COURT_BATCH_SIZE", raising=False)
+    monkeypatch.delenv("VOLLYAI_COURT_DECODER", raising=False)
+    monkeypatch.setattr(CourtLineModel, "from_pretrained", staticmethod(from_pretrained))
+
+    defaults = Settings()
+    CourtLineEstimator(
+        defaults.court_model,
+        device="cuda:0",
+        image_size=defaults.court_imgsz,
+        decoder=defaults.court_decoder,
+        batch_size=defaults.court_batch_size,
+        layout_every=1,
+        refresh_every=120,
+        track_every=1,
+        max_hold_frames=180,
+    )
+    monkeypatch.setenv("VOLLYAI_COURT_MODEL", "v2")
+    rollback = Settings()
+    CourtLineEstimator(
+        rollback.court_model,
+        device="cuda:0",
+        image_size=rollback.court_imgsz,
+        decoder=rollback.court_decoder,
+        batch_size=rollback.court_batch_size,
+        layout_every=1,
+        refresh_every=120,
+        track_every=1,
+        max_hold_frames=180,
+    )
+
+    assert defaults.court_model == "v3"
+    assert defaults.court_imgsz == 512
+    assert defaults.court_batch_size == 16
+    assert defaults.court_decoder == "auto"
+    assert rollback.court_model == "v2"
+    assert [model for model, _ in calls] == ["v3", "v2"]
+    assert all(config["include_layout"] is True for _, config in calls)
 
 
 def test_abstained_current_frame_does_not_render_stale_layout() -> None:

@@ -6,8 +6,8 @@ param(
     [string]$InstanceKey = "analysis-worker-local",
     [int]$Concurrency = 1,
     [int]$ReIdEvery = 1,
-    [string]$CourtModel = "v1",
-    [int]$CourtImageSize = 640
+    [string]$CourtModel = "v3",
+    [int]$CourtImageSize = 512
 )
 
 $ErrorActionPreference = "Stop"
@@ -19,6 +19,8 @@ $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
 $env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
 $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
+$env:VOLLYAI_COURT_BATCH_SIZE = "16"
+$env:VOLLYAI_COURT_DECODER = "auto"
 Push-Location $projectRoot
 try {
     uv run --no-sync volleyball-analysis worker

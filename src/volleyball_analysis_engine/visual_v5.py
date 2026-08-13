@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import cv2
 import numpy as np
-from volleyball_monitoring_ai import AIJobRequest, AnalysisResult
+from volleyball_monitoring_ai import AIJobRequest, AnalysisDomainData
 
 from .records import BallObservation, CourtFrame, FrameObservation
 
@@ -384,7 +384,7 @@ def _action_states_for_frame(
     duration_frames = max(1, round(fps))
     highlight_frames = max(1, round(fps * 0.10))
     for event in events:
-        event_frame = int(event.get("resolved_frame_index", event["anchor_frame_index"]))
+        event_frame = int(event["anchor_frame_index"])
         if not event_frame <= frame_index < event_frame + duration_frames:
             continue
         for actor in event.get("actors", []):
@@ -516,14 +516,14 @@ def _draw_ball(
             event
             for event in events
             if 0
-            <= int(event.get("resolved_frame_index", event["anchor_frame_index"])) - frame_index
+            <= int(event["anchor_frame_index"]) - frame_index
             <= preview_frames
             and event.get("ball", {}).get("frame_pos")
         ),
         None,
     )
     if upcoming is not None:
-        event_frame = int(upcoming.get("resolved_frame_index", upcoming["anchor_frame_index"]))
+        event_frame = int(upcoming["anchor_frame_index"])
         frames_until = event_frame - frame_index
         center = _frame_point(
             upcoming["ball"]["frame_pos"],
@@ -1160,7 +1160,7 @@ def write_visual_v5_package(
     output_dir: Path,
     clip_path: Path,
     job: AIJobRequest,
-    result: AnalysisResult,
+    domain: AnalysisDomainData,
     frames: list[FrameObservation],
     balls: dict[int, BallObservation],
     courts: dict[int, CourtFrame],
@@ -1172,21 +1172,21 @@ def write_visual_v5_package(
     """Write the visual-v5 filenames and layout using only current inference data."""
     output_dir.mkdir(parents=True, exist_ok=True)
     job_document = job.model_dump(mode="json", exclude_none=True)
-    result_document = result.model_dump(mode="json", exclude_none=True)
-    result_path = output_dir / "analysis-result.json"
+    domain_document = domain.model_dump(mode="json", exclude_none=True)
+    domain_path = output_dir / "analysis-data-domain.json"
     video_path = output_dir / "overlay-preview.mp4"
     first_preview = output_dir / "preview-first-complete.jpg"
     terminal_preview = output_dir / "preview-terminal-path.jpg"
     manifest_path = output_dir / "visualization-manifest.json"
-    result_path.write_text(
-        json.dumps(result_document, ensure_ascii=False, indent=2),
+    domain_path.write_text(
+        json.dumps(domain_document, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     rendering = _render_video(
         clip_path=clip_path,
         output_path=video_path,
         job=job_document,
-        result=result_document,
+        result=domain_document,
         frames=frames,
         balls=balls,
         courts=courts,
@@ -1198,7 +1198,7 @@ def write_visual_v5_package(
     manifest = {
         "schema_version": "1.0.0",
         "input_job_schema_version": str(job_document["schema_version"]),
-        "output_result_schema_version": str(result_document["schema_version"]),
+        "analysis_domain_schema_version": str(domain_document["schema_version"]),
         "network_calls": 0,
         "synthetic_ai_fields": False,
         "action_source": "rt_detrv4_x3d_model",
@@ -1210,7 +1210,7 @@ def write_visual_v5_package(
         "ball_annotations": bool(balls),
         "ball_annotation_points": len(balls),
         "video": video_path.name,
-        "result": result_path.name,
+        "analysis_domain": domain_path.name,
         "rendering": rendering,
         "notes": [
             "who_hit is contact_events[].actors[].track_id",
@@ -1218,7 +1218,7 @@ def write_visual_v5_package(
             "actions come from the RT-DETRv4/X3D checkpoint",
             "tracking and 12-player identity consolidation are produced by the engine",
             "court_pos is AI-owned, unclamped canonical court space",
-            "no precomputed Contract Lab result is read during inference",
+            "no precomputed analysis data is read during inference",
             "out-of-court A/B geometry is clipped by a padded court stage",
         ],
     }
@@ -1227,7 +1227,7 @@ def write_visual_v5_package(
         encoding="utf-8",
     )
     return {
-        "result": str(result_path),
+        "analysis_domain": str(domain_path),
         "video": str(video_path),
         "manifest": str(manifest_path),
         "preview_first_complete": str(first_preview),

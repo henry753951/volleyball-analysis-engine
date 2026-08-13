@@ -9,15 +9,26 @@ canonical clip
 → OSNet appearance embeddings
 → harmonic-mean EIoU tracking with a retained lost pool
 → volley-court-lines dense line inference + stable 36-point layout tracking
-→ same-side 2D-court re-entry identity merge (maximum six identities per side)
-→ ball-trajectory contact proposal detection between human service/end boundaries
+→ sparse clip-local OSNet prototypes + co-visibility cannot-links (run-local IDs stay unchanged)
+→ ball-trajectory contact proposal detection between explicit segment START/END boundaries
 → contact-to-player association
 → AnalysisResult 1.1 JSON + VOV1 overlay + developer artifacts
 ```
 
 The engine never reads Contract Lab tracking, ball or court JSON as inference output. Contract Lab
 and `sdk-analysis-visual-v5` are reference material only. Human `clip_pts`, `clip_time_us` and
-`clip_frame_index` values remain immutable anchors from the incoming job.
+`clip_frame_index` values remain immutable anchors from the incoming job. Job 2.0 segment
+boundaries define analysis coverage; optional human X contacts are hints, not synthetic serve/end
+events. Legacy Job 1.1 remains accepted for historical queued work.
+
+`AnalysisResult.extensions.reid_feature_bank` is a versioned clip-scoped interchange artifact. It
+contains exactly one L2-normalized 512-D Sports OSNet prototype per sampled run-local track, split
+into left/right/unknown banks from projected court-side observations. Matching follows the
+calibrated `volley-reid` eligibility boundary: at least 12 detections at least 28 pixels tall, then
+the best-quality observation from each of four temporal bins is averaged into the exported
+prototype. Per-frame embeddings remain transient and are never written to the result. The bank
+also exports simultaneous-track cannot-links and the cached OSNet checkpoint SHA256 so a downstream
+match/roster identity service can consolidate clips without rewriting clip-local track IDs.
 
 ## Repository layout
 
@@ -44,8 +55,9 @@ The defaults point at the assets supplied for this project:
 
 This extracts `E:\User\Downloads\volleyball_ball_action.zip`, copies `best_stg1.pth`, installs
 CUDA 13.0 PyTorch and model dependencies with `uv`, downloads the checksum-verified
-`volley-court-lines` v1 model on first use, then runs the environment doctor and strictly loads
-both model stacks. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to replace an
+`volley-court-lines` v3 layout model on first use, then runs the environment doctor and strictly
+loads both model stacks. Set `VOLLYAI_COURT_MODEL=v2` to use the retained rollback model without
+changing engine code. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to replace an
 earlier extraction.
 
 The default X3D temporal backend is the exact rolling-window implementation supplied with the
@@ -81,9 +93,10 @@ separates model warmup from job wall time and reports effective FPS and real-tim
 ### Local RTX 5070 benchmark
 
 The checked-in quality profile performs fresh player, ball, action, ReID, and court-line model
-inference on every source frame. Court identity/layout matching also runs on every frame. The
-previous accepted topology is only a bounded prior for matching the current frame's line geometry;
-it is not reused as stale output. Ambiguous frames abstain instead of drawing a fake complete court.
+inference on every source frame. The v3 model returns a direct 36-point layout for every frame;
+the engine consumes that layout once and never sends it through the legacy layout matcher again.
+Only `ok` layouts containing all 36 keypoints enter temporal tracking. Ambiguous or abstained
+frames never become accepted output and are not replaced by stale geometry.
 Model warmup is intentionally outside job wall time because the online worker completes it before
 registering. Developer preview rendering is disabled online by default; its final H.264/AAC web
 encode uses NVENC when available and falls back to libx264.
@@ -102,10 +115,10 @@ back into the overlay while retaining short-gap continuity. The rendered H.264 s
 to contain all 884 source frames; audio ending a few milliseconds earlier does not truncate the
 video stream.
 
-Court layout recovery keeps a clip-level Pose36 orientation transform. If full search recovers the
-same geometry with a left/right, near/far, or 180-degree symmetric identity, keypoint IDs and the
-output homography are mapped back to the established orientation. Raw model/tracker geometry stays
-unchanged, so the lock does not reduce per-frame matching or optical-flow continuity.
+Court layout recovery keeps a clip-level Pose36 orientation transform. If a later direct proposal
+returns the same geometry with a left/right, near/far, or 180-degree symmetric identity, keypoint
+IDs and the output homography are mapped back to the established orientation. Raw model/tracker
+geometry stays unchanged, so the lock does not reduce per-frame tracking continuity.
 
 Output:
 

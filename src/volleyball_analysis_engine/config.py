@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.6.0+reid-bank-court-v3-majority"
+    provider_build_id: str = "volleyball-analysis-engine/0.7.0+nested-part-fixed-roster"
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"
@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     detector_input_scale: float = Field(default=1.0, ge=0.5, le=1.0)
     reid_every: int = Field(default=1, ge=1, le=30)
+    nested_reid_enabled: bool = True
+    nested_reid_batch_size: int = Field(default=64, ge=1, le=256)
     court_model: str = "v3"
     court_imgsz: int = Field(default=512, ge=320, le=2048)
     court_batch_size: int = Field(default=16, ge=1, le=64)
@@ -49,6 +51,18 @@ class Settings(BaseSettings):
         "../volley-ai/upstream/selective-mask-propagation/"
         "selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60"
     )
+    dinov2_root: Path = Path.home() / ".cache/torch/hub/facebookresearch_dinov2_main"
+    dinov2_checkpoint: Path = (
+        Path.home() / ".cache/torch/hub/checkpoints/dinov2_vits14_reg4_pretrain.pth"
+    )
+    pose_checkpoint: Path = Path("../volley-ai/yolo26n-pose.pt")
+    kpr_python: Path = Path("../volley-reid/third_party/kpr/.venv/Scripts/python.exe")
+    kpr_root: Path = Path("../volley-reid/third_party/kpr")
+    kpr_checkpoint: Path = Path(
+        "../volley-reid/third_party/kpr/pretrained_models/"
+        "kpr_occ_pt_IN_82.34_92.33_42323828.pth.tar"
+    )
+    kpr_bridge: Path = Path("scripts/extract_kpr_pair_features.py")
 
     def validate_online(self) -> None:
         """Validate credentials only for the networked worker mode."""

@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Signed media URLs contain short-lived credentials and must never enter logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     arguments = _parser().parse_args(argv)
     settings = Settings()
     if arguments.command == "worker":

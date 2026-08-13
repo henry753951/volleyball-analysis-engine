@@ -15,6 +15,7 @@ from volleyball_monitoring_ai import (
 
 from .config import Settings
 from .inference import ModelPaths, Rtv4X3DObservationProvider
+from .nested_reid import NestedPartDescriptorExtractor, NestedReidPaths
 from .pipeline import AnalysisPipeline, PipelineConfig
 
 LOGGER = logging.getLogger(__name__)
@@ -38,7 +39,7 @@ def capabilities(settings: Settings) -> ProviderCapabilities:
                 "action": True,
                 "group_phase": False,
                 "confidence": True,
-                "reid_feature_bank": True,
+                "fixed_roster_reid": True,
             },
             "action_taxonomies": [
                 {
@@ -118,6 +119,23 @@ async def run_worker(settings: Settings) -> None:
 
 def build_pipeline(settings: Settings) -> AnalysisPipeline:
     """Build the single model pipeline shared by online and offline entrypoints."""
+    nested_reid = (
+        NestedPartDescriptorExtractor(
+            NestedReidPaths(
+                dinov2_root=settings.dinov2_root,
+                dinov2_checkpoint=settings.dinov2_checkpoint,
+                pose_checkpoint=settings.pose_checkpoint,
+                kpr_python=settings.kpr_python,
+                kpr_root=settings.kpr_root,
+                kpr_checkpoint=settings.kpr_checkpoint,
+                kpr_bridge=settings.kpr_bridge,
+            ),
+            device=settings.device,
+            batch_size=settings.nested_reid_batch_size,
+        )
+        if settings.nested_reid_enabled
+        else None
+    )
     provider = Rtv4X3DObservationProvider(
         ModelPaths(
             rtv4_root=settings.rtv4_root,
@@ -140,5 +158,6 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         court_max_hold_frames=settings.court_max_hold_frames,
         court_decoder=settings.court_decoder,
         disable_amp=settings.disable_amp,
+        nested_reid=nested_reid,
     )
     return AnalysisPipeline(provider, PipelineConfig())

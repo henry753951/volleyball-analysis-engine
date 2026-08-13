@@ -8,21 +8,17 @@ from volleyball_analysis_engine.records import (
     CourtSide,
     FrameObservation,
     PlayerObservation,
-    ReIdEmbeddingModel,
-    ReIdFeatureSnapshot,
-    ReIdTrackFeature,
 )
-from volleyball_analysis_engine.reid_features import build_reid_feature_bank
+from volleyball_analysis_engine.reid_features import (
+    _descriptor_bytes,  # pyright: ignore[reportPrivateUsage]
+    resolve_track_court_sides,
+)
 
 _TRACK_ID = 7
 
 
 def _frames_for_side_counts(*, left: int, right: int, unknown: int) -> list[FrameObservation]:
-    court_positions = (
-        [(0.25, 0.5)] * left
-        + [(0.75, 0.5)] * right
-        + [None] * unknown
-    )
+    court_positions = [(0.25, 0.5)] * left + [(0.75, 0.5)] * right + [None] * unknown
     return [
         FrameObservation(
             frame_index=frame_index,
@@ -45,33 +41,7 @@ def _frames_for_side_counts(*, left: int, right: int, unknown: int) -> list[Fram
 
 def _feature_side(*, left: int, right: int, unknown: int) -> CourtSide:
     frames = _frames_for_side_counts(left=left, right=right, unknown=unknown)
-    snapshot = ReIdFeatureSnapshot(
-        schema_version="1.0.0",
-        embedding_model=ReIdEmbeddingModel(
-            name="sports-osnet",
-            checkpoint_sha256="a" * 64,
-            preprocess_version="roi-align-rgb-imagenet-v1",
-            dimension=1,
-            distance="cosine",
-        ),
-        features=(
-            ReIdTrackFeature(
-                track_id=_TRACK_ID,
-                prototype=(1.0,),
-                sample_count=len(frames),
-                first_frame_index=0,
-                last_frame_index=len(frames) - 1,
-                mean_quality=0.9,
-                cannot_link_track_ids=(),
-            ),
-        ),
-    )
-    feature_bank = build_reid_feature_bank(snapshot, frames, map_frame=lambda value: value)
-    populated_banks = [
-        bank for bank in feature_bank["side_feature_banks"] if bank["features"]
-    ]
-    assert len(populated_banks) == 1
-    return populated_banks[0]["court_side"]
+    return resolve_track_court_sides(frames)[_TRACK_ID]
 
 
 @pytest.mark.parametrize(
@@ -92,3 +62,7 @@ def test_feature_side_uses_volley_reid_known_side_majority(
     expected: CourtSide,
 ) -> None:
     assert _feature_side(left=left, right=right, unknown=unknown) == expected
+
+
+def test_zero_descriptor_is_downgraded_to_missing_instead_of_fabricated() -> None:
+    assert _descriptor_bytes([(0.0,) * 384]) is None

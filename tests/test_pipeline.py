@@ -17,6 +17,7 @@ from volleyball_analysis_engine.records import (
     CourtFrame,
     CourtKeypoint,
     PlayerObservation,
+    ReIdDescriptorSet,
     ReIdEmbeddingModel,
     ReIdFeatureSnapshot,
     ReIdTrackFeature,
@@ -29,6 +30,10 @@ def feature_snapshot(
     cannot_links: dict[int, tuple[int, ...]] | None = None,
 ) -> ReIdFeatureSnapshot:
     links = cannot_links or {}
+
+    def descriptor(dimension: int, track_id: int) -> tuple[float, ...]:
+        return tuple(1.0 if index == track_id % dimension else 0.0 for index in range(dimension))
+
     return ReIdFeatureSnapshot(
         schema_version="1.0.0",
         embedding_model=ReIdEmbeddingModel(
@@ -50,6 +55,29 @@ def feature_snapshot(
             )
             for track_id, (first_frame, last_frame) in sorted(track_bounds.items())
         ),
+        descriptor_sets=tuple(
+            ReIdDescriptorSet(
+                track_id=track_id,
+                dino=descriptor(384, track_id),
+                osnet=descriptor(512, track_id),
+                kpr=descriptor(4096, track_id),
+                kpr_prompt=descriptor(4096, track_id),
+                prompt_coverage=1.0,
+            )
+            for track_id in sorted(track_bounds)
+        ),
+        descriptor_recipe={
+            "name": "nested-part-adaptation",
+            "version": "1.0.0",
+            "selection_protocol": "past-only-nested-leave-one-clip-out",
+            "roster_contract": "fixed-six-per-team",
+            "modalities": [
+                {"name": "dino", "dimension": 384},
+                {"name": "osnet", "dimension": 512},
+                {"name": "kpr", "dimension": 4096},
+                {"name": "kpr_prompt", "dimension": 4096},
+            ],
+        },
     )
 
 
@@ -125,7 +153,11 @@ class ManyPlayersProvider(FakeProvider):
                     track_id=track_id,
                     frame_bbox=(0.04 * track_id, 0.2, 0.04 * track_id + 0.03, 0.7),
                     frame_foot_pos=(0.04 * track_id + 0.015, 0.7),
-                    court_pos=(0.04 * track_id, 0.5),
+                    court_pos=(
+                        (0.75, 0.5)
+                        if frame == 0 and track_id == 7
+                        else (0.04 * track_id, 0.5)
+                    ),
                     confidence=0.9,
                 )
                 for track_id in track_ids
@@ -291,37 +323,35 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_analysis_da
     assert bundle.domain.path_segments[0].end_frame_index == "2"
     assert bundle.domain.extensions["canonical_frame_count"] == 3
     assert bundle.domain.extensions["contact_suggestions"] == []
-    feature_bank = bundle.domain.extensions["reid_feature_bank"]
+    feature_bank = bundle.domain.extensions["fixed_roster_reid"]
     assert set(feature_bank) == {
         "schema_version",
         "scope",
-        "embedding_model",
-        "side_feature_banks",
+        "identity_contract",
+        "slots_per_team",
+        "descriptor_recipe",
+        "tracklets",
     }
-    assert feature_bank["schema_version"] == "1.0.0"
+    assert feature_bank["schema_version"] == "2.0.0"
     assert feature_bank["scope"] == "clip"
-    assert feature_bank["embedding_model"] == {
-        "name": "sports-osnet",
-        "checkpoint_sha256": "b" * 64,
-        "preprocess_version": "roi-align-rgb-imagenet-v1",
-        "dimension": 512,
-        "distance": "cosine",
-    }
-    side_banks = feature_bank["side_feature_banks"]
-    assert [bank["court_side"] for bank in side_banks] == ["left", "right", "unknown"]
-    features = [feature for bank in side_banks for feature in bank["features"]]
-    assert {feature["track_id"] for feature in features} == {1, 7}
+    assert feature_bank["identity_contract"] == "fixed-six-per-team"
+    assert feature_bank["slots_per_team"] == 6
+    features = feature_bank["tracklets"]
+    assert {track_id for feature in features for track_id in feature["track_ids"]} == {1, 7}
     assert set(features[0]) == {
-        "provisional_gid",
-        "track_id",
+        "canonical_track_id",
+        "track_ids",
+        "court_side",
+        "median_court_pos",
         "first_frame_index",
         "last_frame_index",
         "sample_count",
         "mean_quality",
-        "prototype",
-        "cannot_link_track_ids",
+        "prompt_coverage",
+        "descriptors",
+        "cannot_link_canonical_track_ids",
     }
-    assert len(features[0]["prototype"]) == 512
+    assert set(features[0]["descriptors"]) == {"dino", "osnet", "kpr", "kpr_prompt"}
     action = bundle.domain.contact_events[0].actors[0].action
     assert action is not None
     assert action.label == "setting"
@@ -334,9 +364,7 @@ def test_pipeline_does_not_generate_contact_proposals_over_manual_markers(
     clip = tmp_path / "clip.mp4"
     clip.write_bytes(b"unit-test")
 
-    with patch(
-        "volleyball_analysis_engine.pipeline.detect_contact_proposals"
-    ) as detect_proposals:
+    with patch("volleyball_analysis_engine.pipeline.detect_contact_proposals") as detect_proposals:
         bundle = AnalysisPipeline(FakeProvider()).analyze(job(), clip)
 
     detect_proposals.assert_not_called()
@@ -383,7 +411,7 @@ def test_pipeline_uses_v2_boundaries_when_no_human_contacts_are_supplied(
     assert bundle.domain.extensions["contact_suggestions"] == []
 
 
-def test_pipeline_preserves_more_than_six_run_local_identities_per_side(
+def test_pipeline_keeps_six_most_central_tracklets_on_one_court_side(
     tmp_path: Path,
 ) -> None:
     clip = tmp_path / "clip.mp4"
@@ -391,10 +419,16 @@ def test_pipeline_preserves_more_than_six_run_local_identities_per_side(
 
     bundle = AnalysisPipeline(ManyPlayersProvider()).analyze(job(), clip)
 
-    assert {track.track_id for track in bundle.domain.tracks} == set(range(1, 8))
-    left_bank = bundle.domain.extensions["reid_feature_bank"]["side_feature_banks"][0]
-    assert left_bank["court_side"] == "left"
-    assert {feature["track_id"] for feature in left_bank["features"]} == set(range(1, 8))
+    bank = bundle.domain.extensions["fixed_roster_reid"]
+    assert len(bank["tracklets"]) == 6
+    assert [tracklet["canonical_track_id"] for tracklet in bank["tracklets"]] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+    ]
 
 
 def test_pipeline_and_reid_bank_share_majority_track_side_resolution(
@@ -415,9 +449,9 @@ def test_pipeline_and_reid_bank_share_majority_track_side_resolution(
 
     track_sides = {track.track_id: track.court_side for track in bundle.domain.tracks}
     feature_sides = {
-        feature["track_id"]: bank["court_side"]
-        for bank in bundle.domain.extensions["reid_feature_bank"]["side_feature_banks"]
-        for feature in bank["features"]
+        track_id: feature["court_side"]
+        for feature in bundle.domain.extensions["fixed_roster_reid"]["tracklets"]
+        for track_id in feature["track_ids"]
     }
     assert track_sides == {1: "left", 2: "left"}
     assert feature_sides == track_sides

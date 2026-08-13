@@ -21,6 +21,7 @@ from volleyball_monitoring_ai import AIJobRequest
 
 from .ball_tracking import BallTrajectoryTracker
 from .court import CourtLineEstimator, interpolate_short_court_gaps
+from .nested_reid import NestedPartDescriptorExtractor
 from .records import (
     ActionObservation,
     BallObservation,
@@ -67,6 +68,20 @@ def normalize_frame_bbox(
     left, right = sorted((_unit_interval(x1 / width), _unit_interval(x2 / width)))
     top, bottom = sorted((_unit_interval(y1 / height), _unit_interval(y2 / height)))
     return left, top, right, bottom
+
+
+def _crop_detection(
+    frame: NDArray[np.uint8],
+    bbox: NDArray[np.float32],
+) -> NDArray[np.uint8] | None:
+    """Crop one real detector observation in source pixels for bounded ReID sampling."""
+    height, width = frame.shape[:2]
+    x1 = max(0, min(width - 1, int(np.floor(float(bbox[0])))))
+    y1 = max(0, min(height - 1, int(np.floor(float(bbox[1])))))
+    x2 = max(x1 + 1, min(width, int(np.ceil(float(bbox[2])))))
+    y2 = max(y1 + 1, min(height, int(np.ceil(float(bbox[3])))))
+    crop = frame[y1:y2, x1:x2]
+    return np.ascontiguousarray(crop) if crop.size else None
 
 
 def _empty_metadata() -> dict[str, Any]:
@@ -192,6 +207,7 @@ class HarmonicMeanTracker:
         scores: NDArray[np.float32],
         embeddings: NDArray[np.float32] | None,
         detection_track_ids: dict[int, int],
+        frame: NDArray[np.uint8] | None = None,
     ) -> None:
         """Aggregate sufficiently large real detections, never extrapolated boxes."""
         eligible = {
@@ -206,12 +222,14 @@ class HarmonicMeanTracker:
         for detection_index, track_id in sorted(eligible.items()):
             bbox_height = float(boxes[detection_index][3] - boxes[detection_index][1])
             score = float(scores[detection_index])
+            crop = _crop_detection(frame, boxes[detection_index]) if frame is not None else None
             self._reid_features.observe(
                 track_id=track_id,
                 frame_index=frame_index,
                 embedding=embeddings[detection_index],
                 quality=score,
                 selection_quality=score * bbox_height,
+                crop_bgr=crop,
             )
 
     def _appearance_recovery_matches(
@@ -270,6 +288,7 @@ class HarmonicMeanTracker:
         boxes: NDArray[np.float32],
         scores: NDArray[np.float32],
         embeddings: NDArray[np.float32] | None,
+        frame: NDArray[np.uint8] | None = None,
     ) -> list[_TrackedDetection]:
         """Associate every current person detection without capping raw identities."""
         self._tracks = {
@@ -377,6 +396,7 @@ class HarmonicMeanTracker:
             scores=scores,
             embeddings=embeddings,
             detection_track_ids=detection_track_ids,
+            frame=frame,
         )
         for track_id in previously_visible - visible_track_ids:
             track = self._tracks.get(track_id)
@@ -519,6 +539,7 @@ class Rtv4X3DObservationProvider:
         court_max_hold_frames: int = 180,
         court_decoder: str = "auto",
         disable_amp: bool = False,
+        nested_reid: NestedPartDescriptorExtractor | None = None,
     ) -> None:
         paths.validate()
         self.paths = paths
@@ -536,6 +557,7 @@ class Rtv4X3DObservationProvider:
         self.court_max_hold_frames = max(0, court_max_hold_frames)
         self.court_decoder = court_decoder
         self.disable_amp = disable_amp
+        self.nested_reid = nested_reid
         self._torch: Any = None
         self._model: Any = None
         self._postprocessor: Any = None
@@ -647,6 +669,10 @@ class Rtv4X3DObservationProvider:
             raise ValueError(
                 f"decoded frame count mismatch: job={expected_frames}, decoded={frame_index}"
             )
+        reid_snapshot = tracker.reid_feature_snapshot(self._embedding_model_metadata())
+        if self.nested_reid is not None:
+            report(0.70, "nested_part_descriptors")
+            reid_snapshot = self.nested_reid.enrich(reid_snapshot)
         return InferenceResult(
             players=players,
             courts=courts,
@@ -656,7 +682,7 @@ class Rtv4X3DObservationProvider:
             frame_width=width,
             frame_height=height,
             fps=fps,
-            reid_feature_snapshot=tracker.reid_feature_snapshot(self._embedding_model_metadata()),
+            reid_feature_snapshot=reid_snapshot,
             metadata={
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
@@ -683,6 +709,8 @@ class Rtv4X3DObservationProvider:
     def prepare(self, report: ProgressReporter | None = None) -> None:
         """Load and strictly validate all model checkpoints without decoding a clip."""
         self._load_models(report or (lambda _progress, _stage: None))
+        if self.nested_reid is not None:
+            self.nested_reid.prepare()
 
     def _load_models(self, report: ProgressReporter) -> None:
         if self._model is not None:
@@ -866,6 +894,7 @@ class Rtv4X3DObservationProvider:
             person_boxes,
             person_scores,
             embeddings,
+            frame,
         )
         tracking_seconds = perf_counter() - started
 

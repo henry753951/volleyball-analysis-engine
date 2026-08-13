@@ -94,7 +94,7 @@ class ReIdEmbeddingModel:
 
 @dataclass(frozen=True, slots=True)
 class ReIdTrackFeature:
-    """One compact clip-local appearance prototype for a run-local track."""
+    """One bounded multi-frame appearance sample set for a run-local track."""
 
     track_id: int
     prototype: tuple[float, ...]
@@ -103,6 +103,29 @@ class ReIdTrackFeature:
     last_frame_index: int
     mean_quality: float
     cannot_link_track_ids: tuple[int, ...]
+    samples: tuple[ReIdTrackSample, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class ReIdTrackSample:
+    """One selected quality-temporal crop and its frozen Sports OSNet descriptor."""
+
+    frame_index: int
+    quality: float
+    osnet_embedding: tuple[float, ...]
+    crop_jpeg: bytes | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ReIdDescriptorSet:
+    """Nested Part Adaptation descriptors aggregated over one tracklet."""
+
+    track_id: int
+    dino: tuple[float, ...]
+    osnet: tuple[float, ...]
+    kpr: tuple[float, ...]
+    kpr_prompt: tuple[float, ...]
+    prompt_coverage: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,3 +135,5 @@ class ReIdFeatureSnapshot:
     schema_version: Literal["1.0.0"]
     embedding_model: ReIdEmbeddingModel
     features: tuple[ReIdTrackFeature, ...]
+    descriptor_sets: tuple[ReIdDescriptorSet, ...] = ()
+    descriptor_recipe: dict[str, object] | None = None

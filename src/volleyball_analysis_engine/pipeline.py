@@ -66,7 +66,7 @@ class _EventSpec:
 class AnalysisPipeline:
     """Produce one contract-valid AnalysisData artifact for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-reid-physics-contact-0.6.0"
+    analysis_version = "rtv4-x3d-court-nested-reid-contact-0.7.0"
 
     def __init__(
         self,
@@ -120,6 +120,7 @@ class AnalysisPipeline:
                 source_last_frame,
                 destination_frames,
             ),
+            descriptor_recipe=inferred.reid_feature_snapshot.descriptor_recipe or {},
         )
         players_by_frame = {frame.frame_index: frame.players for frame in frames}
 
@@ -173,8 +174,8 @@ class AnalysisPipeline:
                     "inference_source": "canonical_clip",
                     "court_detection": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
                     "tracking": "harmonic-mean-eiou+OSNet",
-                    "reid": "clip-local-sports-osnet-feature-bank-v1",
-                    "reid_feature_bank": reid_feature_bank,
+                    "reid": "nested-part-adaptation-fixed-roster-v2",
+                    "fixed_roster_reid": reid_feature_bank,
                     "action_source": "RT-DETRv4-X3D",
                     "provider_metadata": inferred.metadata,
                     "contact_suggestions": contact_suggestions,
@@ -669,7 +670,7 @@ class AnalysisPipeline:
                     ),
                     "metadata": {
                         "reid_basis": "run_local_tracker_id",
-                        "reid_feature_bank": "1.0.0",
+                        "fixed_roster_reid": "2.0.0",
                         "source_track_ids": sorted({player.source_track_id for player in players}),
                     },
                 }

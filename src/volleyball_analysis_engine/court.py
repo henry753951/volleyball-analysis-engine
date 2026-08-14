@@ -240,6 +240,7 @@ class CourtVideoProcessor:
         has_layout = self._tracker.current is not None
         inference_every = self._refresh_every if has_layout else self._layout_every
         should_infer = frame_index % inference_every == 0
+        prior = self._last_reliable_layout or self._tracker.current
         layout = None
         if should_infer:
             started = perf_counter()
@@ -249,6 +250,12 @@ class CourtVideoProcessor:
             self.timing.inference_frames += 1
             self.timing.layout_attempts += 1
             layout = self._accepted_layout(result.layout)
+            layout = self._stabilize_layout(
+                layout,
+                prior,
+                width=int(frame.shape[1]),
+                height=int(frame.shape[0]),
+            )
 
         should_track = layout is not None or frame_index % self._track_every == 0
         if should_track:
@@ -264,10 +271,15 @@ class CourtVideoProcessor:
             tracked = self._tracker.current
         if should_infer and layout is None:
             return {}
-        court = self._court_frame(frame_index, tracked)
+        output_layout = (
+            None
+            if tracked is None
+            else self._reorient_layout(tracked, self._output_orientation)
+        )
+        court = self._court_frame(frame_index, output_layout)
         if court is None:
             return {}
-        self._last_reliable_layout = tracked
+        self._last_reliable_layout = layout or tracked
         self.timing.accepted_frames += 1
         return {frame_index: court}
 
@@ -302,25 +314,12 @@ class CourtVideoProcessor:
     ) -> CourtFrame | None:
         prior = self._last_reliable_layout or self._tracker.current
         self.timing.layout_attempts += 1
-        accepted = self._accepted_layout(result.layout)
-        if accepted is not None and prior is None:
-            self._output_orientation = self._screen_canonical_orientation(accepted)
-        if accepted is not None and prior is not None:
-            aligned, correction = self._align_orientation(accepted, prior)
-            jump = self._layout_jump_px(prior, aligned)
-            maximum_jump = MAXIMUM_LAYOUT_JUMP_RATIO * math.hypot(
-                float(frame.shape[1]),
-                float(frame.shape[0]),
-            )
-            if jump is None or jump > maximum_jump:
-                accepted = None
-                self.timing.orientation_jump_rejections += 1
-            elif correction != "identity":
-                self._output_orientation = self._compose_orientations(
-                    correction,
-                    self._output_orientation,
-                )
-                self.timing.orientation_corrections += 1
+        accepted = self._stabilize_layout(
+            self._accepted_layout(result.layout),
+            prior,
+            width=int(frame.shape[1]),
+            height=int(frame.shape[0]),
+        )
         tracked = self._track(accepted, frame)
         if accepted is None:
             return None
@@ -333,6 +332,35 @@ class CourtVideoProcessor:
         if court is not None:
             self._last_reliable_layout = accepted or tracked
         return court
+
+    def _stabilize_layout(
+        self,
+        candidate: CourtLayout | None,
+        reference: CourtLayout | None,
+        *,
+        width: int,
+        height: int,
+    ) -> CourtLayout | None:
+        """Lock one screen-facing court orientation for the complete clip."""
+        if candidate is None:
+            return None
+        if reference is None:
+            self._output_orientation = self._screen_canonical_orientation(candidate)
+            return candidate
+
+        aligned, correction = self._align_orientation(candidate, reference)
+        jump = self._layout_jump_px(reference, aligned)
+        maximum_jump = MAXIMUM_LAYOUT_JUMP_RATIO * math.hypot(float(width), float(height))
+        if jump is None or jump > maximum_jump:
+            self.timing.orientation_jump_rejections += 1
+            return None
+        if correction != "identity":
+            # ``aligned`` already restores the candidate to the internal
+            # orientation established by the first reliable layout.  The
+            # screen-facing output orientation is clip-scoped and must not
+            # be toggled again when a recovery frame arrives mirrored.
+            self.timing.orientation_corrections += 1
+        return aligned
 
     def _accepted_layout(self, layout: CourtLayout | None) -> CourtLayout | None:
         """Accept only an explicit, complete Pose36 layout from the current frame."""
@@ -467,15 +495,6 @@ class CourtVideoProcessor:
             candidate_keypoints=reindex(layout.candidate_keypoints),
             homography=homography,
             reason=f"orientation locked ({orientation})",
-        )
-
-    @staticmethod
-    def _compose_orientations(first: str, second: str) -> str:
-        composed = _ORIENTATION_TRANSFORMS[first] @ _ORIENTATION_TRANSFORMS[second]
-        return next(
-            name
-            for name, transform in _ORIENTATION_TRANSFORMS.items()
-            if np.allclose(composed, transform)
         )
 
     @staticmethod

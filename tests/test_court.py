@@ -385,3 +385,101 @@ def test_initial_layout_is_oriented_like_the_video_screen() -> None:
     )
 
     assert orientation == "near_far"
+
+
+def test_recovery_orientation_correction_never_flips_output_sides() -> None:
+    def layout(*, flipped: bool) -> CourtLayout:
+        points = tuple(
+            ModelCourtKeypoint(
+                index,
+                20.0 * (9.0 - x if flipped else x) + 100.0,
+                10.0 * (18.0 - y if flipped else y) + 50.0,
+                0.9,
+                True,
+                "test",
+            )
+            for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
+        )
+        homography = (
+            (-20.0, 0.0, 280.0),
+            (0.0, -10.0, 230.0),
+            (0.0, 0.0, 1.0),
+        ) if flipped else (
+            (20.0, 0.0, 100.0),
+            (0.0, 10.0, 50.0),
+            (0.0, 0.0, 1.0),
+        )
+        return CourtLayout(
+            status="ok",
+            score=0.9,
+            reason="test",
+            keypoints=points,
+            candidate_keypoints=points,
+            matched_line_count=7,
+            hypothesis_margin=0.5,
+            semantic_alignment=1.0,
+            homography=homography,
+        )
+
+    model = FakeCourtModel([layout(flipped=False), layout(flipped=True)])
+    processor = CourtVideoProcessor(
+        cast("CourtLineModel", model),
+        batch_size=1,
+        layout_every=1,
+        refresh_every=120,
+        track_every=1,
+        max_hold_frames=30,
+    )
+    frame = np.zeros((300, 400, 3), dtype=np.uint8)
+
+    first = processor.submit(0, frame)[0]
+    recovered = processor.submit(1, frame)[1]
+
+    assert [point.frame_pos_px for point in recovered.keypoints] == [
+        point.frame_pos_px for point in first.keypoints
+    ]
+    assert processor.timing.orientation_corrections == 1
+
+
+def test_sparse_refresh_uses_the_same_clip_orientation_lock() -> None:
+    reference = _layout()
+    flipped_points = tuple(
+        ModelCourtKeypoint(
+            index,
+            10.0 * (18.0 - y) + 100.0,
+            10.0 * (9.0 - x) + 50.0,
+            0.9,
+            True,
+            "test",
+        )
+        for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
+    )
+    flipped = replace(
+        reference,
+        keypoints=flipped_points,
+        candidate_keypoints=flipped_points,
+        homography=(
+            (0.0, -10.0, 280.0),
+            (-10.0, 0.0, 140.0),
+            (0.0, 0.0, 1.0),
+        ),
+    )
+    model = FakeCourtModel([reference, flipped])
+    processor = CourtVideoProcessor(
+        cast("CourtLineModel", model),
+        batch_size=16,
+        layout_every=2,
+        refresh_every=2,
+        track_every=1,
+        max_hold_frames=30,
+    )
+    frame = np.zeros((400, 400, 3), dtype=np.uint8)
+
+    first = processor.submit(0, frame)[0]
+    processor.submit(1, frame)
+    recovered = processor.submit(2, frame)[2]
+
+    assert [point.frame_pos_px for point in recovered.keypoints] == [
+        point.frame_pos_px for point in first.keypoints
+    ]
+    assert processor.timing.orientation_corrections == 1

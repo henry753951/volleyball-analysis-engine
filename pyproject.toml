@@ -115,6 +115,11 @@ ignore = ["COM812", "CPY001", "D203", "D213", "PLR0913", "TC001", "TC002", "TC00
   "TRY003",
 ]
 "src/volleyball_analysis_engine/reid_features.py" = ["C901"]
+# The roster identity service imports Torch, Transformers, Ultralytics and Pillow lazily so
+# that importing the engine package stays cheap for callers that never run a VLM.
+"src/volleyball_analysis_engine/roster_identity/frames.py" = ["PLC0415"]
+"src/volleyball_analysis_engine/roster_identity/service.py" = ["PLC0415"]
+"src/volleyball_analysis_engine/roster_identity/vlm.py" = ["PLC0415"]
 "scripts/extract_kpr_pair_features.py" = ["PLC0415"]
 "src/volleyball_analysis_engine/visual_v5.py" = [
   "ANN401",

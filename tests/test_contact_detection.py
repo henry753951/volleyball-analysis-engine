@@ -38,6 +38,19 @@ def test_rejects_smooth_parabola_and_sparse_gaps() -> None:
     assert detect_contact_proposals(sparse, start_frame=0, end_frame=40, fps=60) == []
 
 
+def test_rejects_noisy_apex_that_only_changes_vertical_speed() -> None:
+    smooth = {
+        frame: ball(
+            frame,
+            0.25 + frame / 200,
+            0.18 + (frame - 24) ** 2 / 9000 + (0.0007 if frame % 2 else -0.0007),
+        )
+        for frame in range(49)
+    }
+
+    assert detect_contact_proposals(smooth, start_frame=0, end_frame=48, fps=60) == []
+
+
 def test_nms_excludes_existing_human_anchor_neighborhood() -> None:
     balls = {frame: ball(frame, frame / 100, frame / 200) for frame in range(41)}
     for frame in range(20, 41):
@@ -48,4 +61,18 @@ def test_nms_excludes_existing_human_anchor_neighborhood() -> None:
         end_frame=40,
         fps=60,
         protected_frames={20},
+    ) == []
+
+
+def test_nms_suppresses_delayed_breakpoint_near_human_anchor() -> None:
+    balls = {frame: ball(frame, frame / 100, (frame / 100) ** 2) for frame in range(41)}
+    for frame in range(20, 41):
+        balls[frame] = ball(frame, 0.4 - (frame - 20) / 80, 0.04 + (frame - 20) / 120)
+
+    assert detect_contact_proposals(
+        balls,
+        start_frame=0,
+        end_frame=40,
+        fps=60,
+        protected_frames={35},
     ) == []

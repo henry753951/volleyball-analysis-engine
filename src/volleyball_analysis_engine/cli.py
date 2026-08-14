@@ -8,12 +8,14 @@ import json
 import logging
 import shutil
 from pathlib import Path
+from time import perf_counter
 from typing import Any
 
 import cv2
+import orjson
 from volleyball_monitoring_ai import (
     AIJobRequest,
-    AnalysisBundle,
+    AnalysisDataBundle,
     OfflineProgressReporter,
     OfflineRunner,
 )
@@ -33,6 +35,8 @@ def _parser() -> argparse.ArgumentParser:
     offline.add_argument("--output", type=Path, required=True)
     offline.add_argument("--keypoints", type=Path)
     offline.add_argument("--skip-clip-verification", action="store_true")
+    offline.add_argument("--prewarm", action="store_true")
+    offline.add_argument("--no-debug-artifacts", action="store_true")
     doctor = subcommands.add_parser("doctor", help="validate models, GPU, FFmpeg and a clip")
     doctor.add_argument("--clip", type=Path)
     doctor.add_argument("--load-models", action="store_true")
@@ -45,6 +49,9 @@ def main(argv: list[str] | None = None) -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    # Signed media URLs contain short-lived credentials and must never enter logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
     arguments = _parser().parse_args(argv)
     settings = Settings()
     if arguments.command == "worker":
@@ -65,25 +72,29 @@ def worker_main() -> None:
 async def _run_offline(settings: Settings, arguments: argparse.Namespace) -> None:
     pipeline = build_pipeline(settings)
     output_dir = arguments.output.expanduser().resolve()
+    prewarm_seconds = 0.0
+    if arguments.prewarm:
+        started = perf_counter()
+        await asyncio.to_thread(pipeline.prepare)
+        prewarm_seconds = perf_counter() - started
 
     def analyze(
         job: AIJobRequest,
         clip_path: Path,
         report: OfflineProgressReporter,
-    ) -> AnalysisBundle:
+    ) -> AnalysisDataBundle:
         return pipeline.analyze(
             job,
             clip_path,
             report,
-            output_dir,
+            None if arguments.no_debug_artifacts else output_dir,
         )
 
     def progress(value: float, stage: str) -> None:
         logging.getLogger(__name__).info("%5.1f%% %s", value * 100.0, stage)
 
-    result = await OfflineRunner(
-        verify_clip=not arguments.skip_clip_verification
-    ).run(
+    started = perf_counter()
+    result = await OfflineRunner(verify_clip=not arguments.skip_clip_verification).run(
         job_path=arguments.job,
         key_points_path=arguments.keypoints,
         clip_path=arguments.clip,
@@ -91,7 +102,26 @@ async def _run_offline(settings: Settings, arguments: argparse.Namespace) -> Non
         analyzer=analyze,
         progress=progress,
     )
-    print(result.output_dir)
+    wall_seconds = perf_counter() - started
+    capture = cv2.VideoCapture(str(arguments.clip.expanduser().resolve()))
+    frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = float(capture.get(cv2.CAP_PROP_FPS))
+    capture.release()
+    clip_seconds = frames / max(fps, 1e-9)
+    benchmark = {
+        "schema": "volleyball-analysis-benchmark-v1",
+        "frames": frames,
+        "source_fps": fps,
+        "clip_seconds": clip_seconds,
+        "prewarm_seconds": prewarm_seconds,
+        "job_wall_seconds": wall_seconds,
+        "effective_fps": frames / max(wall_seconds, 1e-9),
+        "realtime_factor": clip_seconds / max(wall_seconds, 1e-9),
+        "debug_artifacts": not arguments.no_debug_artifacts,
+    }
+    benchmark_path = result.output_dir / "benchmark.json"
+    benchmark_path.write_bytes(orjson.dumps(benchmark, option=orjson.OPT_INDENT_2))
+    print(orjson.dumps(benchmark).decode())
 
 
 def _doctor(settings: Settings, clip: Path | None, *, load_models: bool) -> None:
@@ -128,6 +158,7 @@ def _doctor(settings: Settings, clip: Path | None, *, load_models: bool) -> None
         }
         capture.release()
     if load_models:
+
         def model_progress(value: float, stage: str) -> None:
             logging.getLogger(__name__).info("%5.1f%% %s", value * 100.0, stage)
 

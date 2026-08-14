@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+from time import perf_counter
 
 from volleyball_monitoring_ai import (
     AIWorkerClient,
@@ -13,20 +15,32 @@ from volleyball_monitoring_ai import (
 
 from .config import Settings
 from .inference import ModelPaths, Rtv4X3DObservationProvider
+from .nested_reid import NestedPartDescriptorExtractor, NestedReidPaths
 from .pipeline import AnalysisPipeline, PipelineConfig
+
+LOGGER = logging.getLogger(__name__)
 
 
 def capabilities(settings: Settings) -> ProviderCapabilities:
     """Declare the exact contract versions and temporary optional outputs."""
     return ProviderCapabilities.model_validate(
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "provider_name": "volleyball-analysis-engine",
             "provider_build_id": settings.provider_build_id,
-            "supported_job_schema_versions": ["1.1.0"],
-            "supported_result_schema_versions": ["1.0.0"],
-            "supported_overlay_formats": ["flatbuffers_v1"],
-            "optional_extensions": {"action": True, "group_phase": False, "confidence": True},
+            "supported_job_schema_versions": ["3.0.0"],
+            "supported_analysis_data_versions": ["1.0.0"],
+            "supported_analysis_modules": ["court", "tracking", "reid", "contacts"],
+            # The current pipeline always recomputes one complete AnalysisData
+            # payload. Do not advertise module reuse until source AnalysisData
+            # is actually consumed and merged by the worker.
+            "supports_selective_rerun": False,
+            "optional_extensions": {
+                "action": True,
+                "group_phase": False,
+                "confidence": True,
+                "fixed_roster_reid": True,
+            },
             "action_taxonomies": [
                 {
                     "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",
@@ -42,6 +56,8 @@ async def run_worker(settings: Settings) -> None:
     """Connect forever, accepting only central-server leased work."""
     settings.validate_online()
     pipeline = build_pipeline(settings)
+    if settings.prewarm_models:
+        await asyncio.to_thread(pipeline.prepare)
     worker_config = (
         WorkerConfig(
             server_ws_url=settings.server_ws_url,
@@ -65,7 +81,9 @@ async def run_worker(settings: Settings) -> None:
     client = AIWorkerClient(worker_config)
 
     async def handle(context: JobContext) -> None:
+        download_started = perf_counter()
         clip_path = await context.download_clip()
+        download_seconds = perf_counter() - download_started
         loop = asyncio.get_running_loop()
 
         def report(progress: float, stage: str) -> None:
@@ -75,14 +93,25 @@ async def run_worker(settings: Settings) -> None:
             )
             future.result(timeout=15)
 
+        analysis_started = perf_counter()
         bundle = await asyncio.to_thread(
             pipeline.analyze,
             context.job,
             clip_path,
             report,
-            context.workspace / "artifacts",
+            context.workspace / "artifacts" if settings.write_debug_artifacts else None,
         )
+        analysis_seconds = perf_counter() - analysis_started
+        complete_started = perf_counter()
         await context.complete(bundle)
+        complete_seconds = perf_counter() - complete_started
+        LOGGER.info(
+            "job timing download=%.3fs analysis=%.3fs complete=%.3fs total=%.3fs",
+            download_seconds,
+            analysis_seconds,
+            complete_seconds,
+            download_seconds + analysis_seconds + complete_seconds,
+        )
         await context.report_progress(1.0, "completed")
 
     await client.run_forever(handle)
@@ -90,20 +119,45 @@ async def run_worker(settings: Settings) -> None:
 
 def build_pipeline(settings: Settings) -> AnalysisPipeline:
     """Build the single model pipeline shared by online and offline entrypoints."""
+    nested_reid = (
+        NestedPartDescriptorExtractor(
+            NestedReidPaths(
+                dinov2_root=settings.dinov2_root,
+                dinov2_checkpoint=settings.dinov2_checkpoint,
+                pose_checkpoint=settings.pose_checkpoint,
+                kpr_python=settings.kpr_python,
+                kpr_root=settings.kpr_root,
+                kpr_checkpoint=settings.kpr_checkpoint,
+                kpr_bridge=settings.kpr_bridge,
+            ),
+            device=settings.device,
+            batch_size=settings.nested_reid_batch_size,
+        )
+        if settings.nested_reid_enabled
+        else None
+    )
     provider = Rtv4X3DObservationProvider(
         ModelPaths(
             rtv4_root=settings.rtv4_root,
             rtv4_config=settings.rtv4_config,
             rtv4_checkpoint=settings.rtv4_checkpoint,
-            court_checkpoint=settings.court_checkpoint,
             smp_root=settings.smp_root,
             osnet_checkpoint=settings.osnet_checkpoint,
         ),
         device=settings.device,
         backend=settings.rtv4_backend,
         detector_threshold=settings.detector_threshold,
-        court_stride=settings.court_stride,
+        detector_input_scale=settings.detector_input_scale,
+        reid_every=settings.reid_every,
+        court_model=settings.court_model,
         court_imgsz=settings.court_imgsz,
+        court_batch_size=settings.court_batch_size,
+        court_layout_every=settings.court_layout_every,
+        court_refresh_every=settings.court_refresh_every,
+        court_track_every=settings.court_track_every,
+        court_max_hold_frames=settings.court_max_hold_frames,
+        court_decoder=settings.court_decoder,
         disable_amp=settings.disable_amp,
+        nested_reid=nested_reid,
     )
     return AnalysisPipeline(provider, PipelineConfig())

@@ -38,6 +38,7 @@ RUN useradd --create-home --uid 10001 worker \
 # COPY --chown avoids a second multi-gigabyte layer from a recursive chown.
 COPY --from=dependencies --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 src /app/src
+COPY --chown=10001:10001 scripts /app/scripts
 USER worker
 
 ENTRYPOINT ["python", "-m", "volleyball_analysis_engine", "worker"]

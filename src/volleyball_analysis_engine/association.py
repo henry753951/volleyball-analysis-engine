@@ -41,6 +41,7 @@ def _best_player(
     *,
     frame_width: int,
     frame_height: int,
+    action_label: str | None = None,
 ) -> tuple[PlayerObservation | None, float]:
     radius_px = max(4.0, min(frame_width, frame_height) * 0.018)
     radius_x, radius_y = radius_px / frame_width, radius_px / frame_height
@@ -55,12 +56,30 @@ def _best_player(
     for player in players:
         x1, y1, x2, y2 = player.frame_bbox
         width, height = max(1 / frame_width, x2 - x1), max(1 / frame_height, y2 - y1)
-        expanded = (
-            x1 - max(radius_x, width * 0.35),
-            y1 - max(radius_y, height * 0.35),
-            x2 + max(radius_x, width * 0.35),
-            y2 + max(radius_y, height * 0.35),
-        )
+        horizontal_margin = max(radius_x, width * 0.35)
+        if action_label in {"spiking", "setting"}:
+            # Overhead contacts must be close to the head/arms, not merely the feet.
+            expanded = (
+                x1 - horizontal_margin,
+                y1 - max(radius_y, height * 0.50),
+                x2 + horizontal_margin,
+                y1 + height * 0.65,
+            )
+        elif action_label in {"passing", "digging"}:
+            # Forearm contacts happen around the torso and below, but not far overhead.
+            expanded = (
+                x1 - horizontal_margin,
+                y1 + height * 0.10,
+                x2 + horizontal_margin,
+                y2 + max(radius_y, height * 0.20),
+            )
+        else:
+            expanded = (
+                x1 - horizontal_margin,
+                y1 - max(radius_y, height * 0.35),
+                x2 + horizontal_margin,
+                y2 + max(radius_y, height * 0.35),
+            )
         score = _iou(ball_box, expanded)
         if score > best_score:
             best, best_score = player, score
@@ -130,48 +149,28 @@ def _action_candidate(
             upper_frame=upper_frame,
             max_distance=BALL_ACTION_FRAME_TOLERANCE,
         )
-        if ball is not None:
-            player, score = _best_player(
+        if ball is None:
+            continue
+        ranked: list[tuple[float, PlayerObservation, ActionObservation]] = []
+        for candidate_player, candidate_action in action_players:
+            matched_player, score = _best_player(
                 ball,
-                tuple(candidate[0] for candidate in action_players),
+                (candidate_player,),
                 frame_width=frame_width,
                 frame_height=frame_height,
+                action_label=candidate_action.label.lower(),
             )
-            if player is not None:
-                action = next(
-                    candidate_action
-                    for candidate_player, candidate_action in action_players
-                    if candidate_player.source_track_id == player.source_track_id
-                )
-                return HitAssociation(
-                    ball,
-                    player,
-                    frame_index,
-                    f"action_{action.label.lower()}_ball_iou",
-                    score,
-                )
-
-        player, action = min(
-            action_players,
-            key=lambda candidate: (
-                CONTACT_ACTION_PRIORITY[candidate[1].label.lower()],
-                -(candidate[1].confidence or 0.0),
-                candidate[0].source_track_id,
-            ),
-        )
-        event_ball = ball or _nearest_ball(
-            balls,
-            anchor_frame,
-            lower_frame=lower_frame,
-            upper_frame=upper_frame,
-        )
-        return HitAssociation(
-            event_ball,
-            player,
-            frame_index,
-            f"action_{action.label.lower()}_near_anchor",
-            action.confidence,
-        )
+            if matched_player is not None:
+                ranked.append((score, matched_player, candidate_action))
+        if ranked:
+            score, player, action = max(ranked, key=lambda candidate: candidate[0])
+            return HitAssociation(
+                ball,
+                player,
+                frame_index,
+                f"action_{action.label.lower()}_ball_iou",
+                score,
+            )
     return None
 
 

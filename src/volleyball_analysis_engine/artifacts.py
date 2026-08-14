@@ -7,7 +7,7 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
-from volleyball_monitoring_ai import AIJobRequest, AnalysisResult
+from volleyball_monitoring_ai import AIJobRequest, AnalysisDomainData
 
 from .records import ActionObservation, BallObservation, CourtFrame, FrameObservation
 from .visual_v5 import write_visual_v5_package
@@ -18,7 +18,7 @@ def write_inference_artifacts(
     output_dir: Path,
     clip_path: Path,
     job: AIJobRequest,
-    result: AnalysisResult,
+    domain: AnalysisDomainData,
     frames: list[FrameObservation],
     balls: dict[int, BallObservation],
     courts: dict[int, CourtFrame],
@@ -99,7 +99,7 @@ def write_inference_artifacts(
         output_dir=output_dir,
         clip_path=clip_path,
         job=job,
-        result=result,
+        domain=domain,
         frames=frames,
         balls=balls,
         courts=courts,
@@ -123,7 +123,7 @@ def write_inference_artifacts(
                     "court": court_path.name,
                     "actions": action_path.name,
                     "video": Path(visual_paths["video"]).name,
-                    "result": Path(visual_paths["result"]).name,
+                    "analysis_domain": Path(visual_paths["analysis_domain"]).name,
                     "visual_manifest": Path(visual_paths["manifest"]).name,
                     "preview_first_complete": Path(visual_paths["preview_first_complete"]).name,
                     "preview_terminal_path": Path(visual_paths["preview_terminal_path"]).name,
@@ -140,7 +140,7 @@ def write_inference_artifacts(
         "court": str(court_path),
         "actions": str(action_path),
         "video": visual_paths["video"],
-        "result": visual_paths["result"],
+        "analysis_domain": visual_paths["analysis_domain"],
         "visual_manifest": visual_paths["manifest"],
         "preview_first_complete": visual_paths["preview_first_complete"],
         "preview_terminal_path": visual_paths["preview_terminal_path"],

@@ -5,24 +5,25 @@ param(
     [Alias("WorkerId")]
     [string]$InstanceKey = "analysis-worker-local",
     [int]$Concurrency = 1,
-    [string]$CourtCheckpoint = ".artifacts/models/court-keypoints-video91-canonical-v4.pt",
-    [int]$CourtStride = 1,
-    [int]$CourtImageSize = 1280
+    [int]$ReIdEvery = 1,
+    [string]$CourtModel = "v3",
+    [int]$CourtImageSize = 512
 )
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$checkpoint = (Resolve-Path (Join-Path $projectRoot $CourtCheckpoint)).Path
 $env:VOLLYAI_SERVER_WS_URL = $CentralUrl
 $env:VOLLYAI_TOKEN = $Token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
-$env:VOLLYAI_COURT_CHECKPOINT = $checkpoint
-$env:VOLLYAI_COURT_STRIDE = [string]$CourtStride
+$env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
+$env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
+$env:VOLLYAI_COURT_BATCH_SIZE = "16"
+$env:VOLLYAI_COURT_DECODER = "auto"
 Push-Location $projectRoot
 try {
-    uv run volleyball-analysis worker
+    uv run --no-sync volleyball-analysis worker
 }
 finally {
     Pop-Location

@@ -12,23 +12,35 @@ services:
       VOLLYAI_WORKSPACE: /workspaces
       VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cpu}
       VOLLYAI_RTV4_BACKEND: ${VOLLYAI_RTV4_BACKEND:-rolling}
-      VOLLYAI_COURT_STRIDE: ${VOLLYAI_COURT_STRIDE:-1}
-      VOLLYAI_COURT_IMGSZ: ${VOLLYAI_COURT_IMGSZ:-1280}
+      VOLLYAI_DETECTOR_INPUT_SCALE: ${VOLLYAI_DETECTOR_INPUT_SCALE:-1.0}
+      VOLLYAI_REID_EVERY: ${VOLLYAI_REID_EVERY:-1}
+      VOLLYAI_NESTED_REID_ENABLED: ${VOLLYAI_NESTED_REID_ENABLED:-false}
+      VOLLYAI_NESTED_REID_BATCH_SIZE: ${VOLLYAI_NESTED_REID_BATCH_SIZE:-64}
+      VOLLYAI_COURT_MODEL: ${VOLLYAI_COURT_MODEL:-v3}
+      VOLLYAI_COURT_IMGSZ: ${VOLLYAI_COURT_IMGSZ:-512}
+      VOLLYAI_COURT_BATCH_SIZE: ${VOLLYAI_COURT_BATCH_SIZE:-16}
+      VOLLYAI_COURT_LAYOUT_EVERY: ${VOLLYAI_COURT_LAYOUT_EVERY:-1}
+      VOLLYAI_COURT_REFRESH_EVERY: ${VOLLYAI_COURT_REFRESH_EVERY:-120}
+      VOLLYAI_COURT_TRACK_EVERY: ${VOLLYAI_COURT_TRACK_EVERY:-1}
+      VOLLYAI_COURT_MAX_HOLD_FRAMES: ${VOLLYAI_COURT_MAX_HOLD_FRAMES:-180}
+      VOLLYAI_COURT_DECODER: ${VOLLYAI_COURT_DECODER:-auto}
+      VOLLYAI_PREWARM_MODELS: ${VOLLYAI_PREWARM_MODELS:-true}
+      VOLLYAI_WRITE_DEBUG_ARTIFACTS: ${VOLLYAI_WRITE_DEBUG_ARTIFACTS:-false}
       VOLLYAI_RTV4_ROOT: /models/rtv4
       VOLLYAI_RTV4_CONFIG: /models/rtv4/configs/rtv4/rtv4_x3d_volleyball_v4a_decoupled.yml
       VOLLYAI_RTV4_CHECKPOINT: /models/checkpoints/best_stg1.pth
-      VOLLYAI_COURT_CHECKPOINT: /models/checkpoints/court-keypoints-video91-canonical-v4.pt
       VOLLYAI_SMP_ROOT: /models/smp
       VOLLYAI_OSNET_CHECKPOINT: /models/smp/selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60
     volumes:
       - ${VOLLYAI_RTV4_HOST_ROOT:?Set VOLLYAI_RTV4_HOST_ROOT to the extracted RT-DETRv4 source}:/models/rtv4:ro
       - ${VOLLYAI_RTV4_CHECKPOINT_HOST:?Set VOLLYAI_RTV4_CHECKPOINT_HOST}:/models/checkpoints/best_stg1.pth:ro
-      - ${VOLLYAI_COURT_CHECKPOINT_HOST:?Set VOLLYAI_COURT_CHECKPOINT_HOST}:/models/checkpoints/court-keypoints-video91-canonical-v4.pt:ro
       - ${VOLLYAI_SMP_HOST_ROOT:?Set VOLLYAI_SMP_HOST_ROOT}:/models/smp:ro
       - analysis-workspaces:/workspaces
+      - model-cache:/root/.cache
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway
 
 volumes:
   analysis-workspaces:
+  model-cache:

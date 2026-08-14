@@ -11,7 +11,7 @@ from typing import Any, cast
 
 import cv2
 import numpy as np
-from volleyball_monitoring_ai import AIJobRequest, AnalysisResult
+from volleyball_monitoring_ai import AIJobRequest, AnalysisDomainData
 
 from .records import BallObservation, CourtFrame, FrameObservation
 
@@ -268,7 +268,43 @@ def _draw_court_keypoints(
         return False
     layer = frame.copy()
     drawn = False
-    label_boxes: list[tuple[int, int, int, int]] = []
+    projected: dict[int, tuple[int, int]] = {}
+    for keypoint in court.keypoints:
+        if keypoint.frame_pos_px is None:
+            continue
+        source_x, source_y = keypoint.frame_pos_px
+        projected[keypoint.index] = (
+            round(source_x / max(source_width, 1) * (VIDEO_WIDTH - 1)),
+            round(source_y / max(source_height, 1) * (VIDEO_HEIGHT - 1)),
+        )
+
+    # Accepted Pose36 layouts always render as the complete seven-line court.
+    # The cyan geometry is homography-projected; gold diamonds remain the model
+    # keypoints so the two sources are visually distinct.
+    for first, second in ((0, 4), (4, 5), (5, 9), (9, 0), (1, 8), (2, 7), (3, 6)):
+        start = projected.get(first)
+        end = projected.get(second)
+        if start is None or end is None:
+            continue
+        visible, clipped_start, clipped_end = cv2.clipLine(
+            (0, 0, VIDEO_WIDTH, VIDEO_HEIGHT),
+            start,
+            end,
+        )
+        if not visible:
+            continue
+        cv2.line(layer, clipped_start, clipped_end, (14, 24, 28), 5, cv2.LINE_AA)
+        cv2.line(layer, clipped_start, clipped_end, (235, 205, 70), 2, cv2.LINE_AA)
+        drawn = True
+
+    label_offsets = (
+        (9, -7),
+        (9, 19),
+        (-31, -7),
+        (-31, 19),
+        (9, 35),
+        (-31, 35),
+    )
     for keypoint in court.keypoints:
         if keypoint.frame_pos_px is None:
             continue
@@ -295,53 +331,18 @@ def _draw_court_keypoints(
             0.30,
             1,
         )
-        candidates = (
-            (9, -7),
-            (9, 19),
-            (-text_width - 13, -7),
-            (-text_width - 13, 19),
-            (9, 35),
-            (-text_width - 13, 35),
+        offset_x, offset_y = label_offsets[keypoint.index % len(label_offsets)]
+        if offset_x < 0:
+            offset_x = -text_width - 13
+        label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
+        label_y = max(
+            text_height + 4,
+            min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
         )
-        chosen: tuple[int, int, int, int, int, int] | None = None
-        for offset_x, offset_y in candidates:
-            label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
-            label_y = max(
-                text_height + 4,
-                min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
-            )
-            box = (
-                label_x - 3,
-                label_y - text_height - 3,
-                label_x + text_width + 4,
-                label_y + baseline + 2,
-            )
-            overlaps = any(
-                box[0] < other[2] + 3
-                and box[2] + 3 > other[0]
-                and box[1] < other[3] + 3
-                and box[3] + 3 > other[1]
-                for other in label_boxes
-            )
-            if not overlaps:
-                chosen = (*box, label_x, label_y)
-                break
-        if chosen is None:
-            offset_x, offset_y = candidates[keypoint.index % len(candidates)]
-            label_x = max(3, min(VIDEO_WIDTH - text_width - 6, x + offset_x))
-            label_y = max(
-                text_height + 4,
-                min(VIDEO_HEIGHT - baseline - 3, y + offset_y),
-            )
-            chosen = (
-                label_x - 3,
-                label_y - text_height - 3,
-                label_x + text_width + 4,
-                label_y + baseline + 2,
-                label_x,
-                label_y,
-            )
-        box_left, box_top, box_right, box_bottom, label_x, label_y = chosen
+        box_left = label_x - 3
+        box_top = label_y - text_height - 3
+        box_right = label_x + text_width + 4
+        box_bottom = label_y + baseline + 2
         if abs(label_x - x) > 12 or abs(label_y - y) > 18:
             cv2.line(
                 layer,
@@ -368,7 +369,6 @@ def _draw_court_keypoints(
             1,
             cv2.LINE_AA,
         )
-        label_boxes.append((box_left, box_top, box_right, box_bottom))
         drawn = True
     if drawn:
         cv2.addWeighted(layer, 0.42, frame, 0.58, 0, frame)
@@ -384,7 +384,7 @@ def _action_states_for_frame(
     duration_frames = max(1, round(fps))
     highlight_frames = max(1, round(fps * 0.10))
     for event in events:
-        event_frame = int(event.get("resolved_frame_index", event["anchor_frame_index"]))
+        event_frame = int(event["anchor_frame_index"])
         if not event_frame <= frame_index < event_frame + duration_frames:
             continue
         for actor in event.get("actors", []):
@@ -516,14 +516,14 @@ def _draw_ball(
             event
             for event in events
             if 0
-            <= int(event.get("resolved_frame_index", event["anchor_frame_index"])) - frame_index
+            <= int(event["anchor_frame_index"]) - frame_index
             <= preview_frames
             and event.get("ball", {}).get("frame_pos")
         ),
         None,
     )
     if upcoming is not None:
-        event_frame = int(upcoming.get("resolved_frame_index", upcoming["anchor_frame_index"]))
+        event_frame = int(upcoming["anchor_frame_index"])
         frames_until = event_frame - frame_index
         center = _frame_point(
             upcoming["ball"]["frame_pos"],
@@ -966,11 +966,11 @@ def _terminal_ball_court(
     return (float(court["x"]), float(court["y"])) if court else None
 
 
-def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
+def _encode_web_video(video_only: Path, original: Path, output: Path) -> str:
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RuntimeError("ffmpeg is required to create the visual-v5 package")
-    command = [
+    common = [
         ffmpeg,
         "-hide_banner",
         "-loglevel",
@@ -984,12 +984,8 @@ def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
         "0:v:0",
         "-map",
         "1:a?",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "medium",
-        "-crf",
-        "20",
+    ]
+    web_options = [
         "-pix_fmt",
         "yuv420p",
         "-profile:v",
@@ -1004,14 +1000,29 @@ def _encode_web_video(video_only: Path, original: Path, output: Path) -> None:
         "192k",
         "-movflags",
         "+faststart",
-        "-shortest",
-        str(output),
     ]
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
-    if completed.returncode != 0:
+    encoders = (
+        (
+            "h264_nvenc",
+            ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", "20", "-b:v", "0"],
+        ),
+        ("libx264", ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]),
+    )
+    failures: list[str] = []
+    for name, encoder_options in encoders:
         output.unlink(missing_ok=True)
-        raise RuntimeError(f"ffmpeg visual-v5 encode failed: {completed.stderr.strip()}")
-    video_only.unlink(missing_ok=True)
+        completed = subprocess.run(
+            [*common, *encoder_options, *web_options, str(output)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if completed.returncode == 0:
+            video_only.unlink(missing_ok=True)
+            return name
+        failures.append(f"{name}: {completed.stderr.strip()}")
+    output.unlink(missing_ok=True)
+    raise RuntimeError("ffmpeg visual-v5 encode failed: " + " | ".join(failures))
 
 
 def _render_video(
@@ -1044,7 +1055,7 @@ def _render_video(
 
     frame_map = {observation.frame_index: observation for observation in frames}
     events = cast("list[dict[str, Any]]", result["contact_events"])
-    event_frames = [int(event["anchor_frame_index"]) for event in events]
+    event_frames: list[int] = [int(event["anchor_frame_index"]) for event in events]
     key_points = cast("list[dict[str, Any]]", job["key_points"])
     points_by_id = {point["key_point_id"]: point for point in key_points}
     total_frames = int(job["clip"]["video"]["total_frames"])
@@ -1052,10 +1063,7 @@ def _render_video(
     preview_by_index: dict[int, list[Path]] = {}
     for preview_index, preview_path in zip(preview_indices, preview_paths, strict=True):
         preview_by_index.setdefault(preview_index, []).append(preview_path)
-    sorted_courts = sorted(courts.items())
-    court_cursor = 0
-    active_court: CourtFrame | None = None
-    frame_index = 0
+    frame_index: int = 0
     tracking_frames = 0
     tracking_rows = 0
     ball_frames = 0
@@ -1065,11 +1073,7 @@ def _render_video(
             ok, source_frame = capture.read()
             if not ok:
                 break
-            while (
-                court_cursor < len(sorted_courts) and sorted_courts[court_cursor][0] <= frame_index
-            ):
-                active_court = sorted_courts[court_cursor][1]
-                court_cursor += 1
+            active_court = courts.get(frame_index)
             image = np.zeros((OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
             image[:VIDEO_HEIGHT, :VIDEO_WIDTH] = cv2.resize(
                 source_frame,
@@ -1095,7 +1099,7 @@ def _render_video(
             if events:
                 nearest_index = min(
                     range(len(events)),
-                    key=lambda index: abs(event_frames[index] - frame_index),
+                    key=lambda index: abs(int(event_frames[index]) - int(frame_index)),
                 )
                 event = events[nearest_index]
             else:
@@ -1131,7 +1135,7 @@ def _render_video(
     if frame_index != total_frames:
         video_only.unlink(missing_ok=True)
         raise ValueError(f"decoded {frame_index} frames but AI job declares {total_frames}")
-    _encode_web_video(video_only, clip_path, output_path)
+    video_encoder = _encode_web_video(video_only, clip_path, output_path)
     return {
         "width": OUTPUT_WIDTH,
         "height": OUTPUT_HEIGHT,
@@ -1139,6 +1143,7 @@ def _render_video(
         "frames_written": frame_index,
         "audio_preserved": bool(job["clip"]["video"]["has_audio"]),
         "video_codec": "h264",
+        "video_encoder": video_encoder,
         "pixel_format": "yuv420p",
         "faststart": True,
         "layout": "match_1280x720_plus_info_and_bottom_canonical_court",
@@ -1155,7 +1160,7 @@ def write_visual_v5_package(
     output_dir: Path,
     clip_path: Path,
     job: AIJobRequest,
-    result: AnalysisResult,
+    domain: AnalysisDomainData,
     frames: list[FrameObservation],
     balls: dict[int, BallObservation],
     courts: dict[int, CourtFrame],
@@ -1167,21 +1172,21 @@ def write_visual_v5_package(
     """Write the visual-v5 filenames and layout using only current inference data."""
     output_dir.mkdir(parents=True, exist_ok=True)
     job_document = job.model_dump(mode="json", exclude_none=True)
-    result_document = result.model_dump(mode="json", exclude_none=True)
-    result_path = output_dir / "analysis-result.json"
+    domain_document = domain.model_dump(mode="json", exclude_none=True)
+    domain_path = output_dir / "analysis-data-domain.json"
     video_path = output_dir / "overlay-preview.mp4"
     first_preview = output_dir / "preview-first-complete.jpg"
     terminal_preview = output_dir / "preview-terminal-path.jpg"
     manifest_path = output_dir / "visualization-manifest.json"
-    result_path.write_text(
-        json.dumps(result_document, ensure_ascii=False, indent=2),
+    domain_path.write_text(
+        json.dumps(domain_document, ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
     rendering = _render_video(
         clip_path=clip_path,
         output_path=video_path,
         job=job_document,
-        result=result_document,
+        result=domain_document,
         frames=frames,
         balls=balls,
         courts=courts,
@@ -1193,7 +1198,7 @@ def write_visual_v5_package(
     manifest = {
         "schema_version": "1.0.0",
         "input_job_schema_version": str(job_document["schema_version"]),
-        "output_result_schema_version": str(result_document["schema_version"]),
+        "analysis_domain_schema_version": str(domain_document["schema_version"]),
         "network_calls": 0,
         "synthetic_ai_fields": False,
         "action_source": "rt_detrv4_x3d_model",
@@ -1205,7 +1210,7 @@ def write_visual_v5_package(
         "ball_annotations": bool(balls),
         "ball_annotation_points": len(balls),
         "video": video_path.name,
-        "result": result_path.name,
+        "analysis_domain": domain_path.name,
         "rendering": rendering,
         "notes": [
             "who_hit is contact_events[].actors[].track_id",
@@ -1213,7 +1218,7 @@ def write_visual_v5_package(
             "actions come from the RT-DETRv4/X3D checkpoint",
             "tracking and 12-player identity consolidation are produced by the engine",
             "court_pos is AI-owned, unclamped canonical court space",
-            "no precomputed Contract Lab result is read during inference",
+            "no precomputed analysis data is read during inference",
             "out-of-court A/B geometry is clipped by a padded court stage",
         ],
     }
@@ -1222,7 +1227,7 @@ def write_visual_v5_package(
         encoding="utf-8",
     )
     return {
-        "result": str(result_path),
+        "analysis_domain": str(domain_path),
         "video": str(video_path),
         "manifest": str(manifest_path),
         "preview_first_complete": str(first_preview),

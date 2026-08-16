@@ -41,10 +41,7 @@ class FakeCourtModel:
         self.batch_sizes.append(len(frames))
         self.frame_markers.append([int(frame[0, 0, 0]) for frame in frames])
         self.include_layout_calls.append(include_layout)
-        layouts = [
-            self._layouts.pop(0) if self._layouts else self._empty_layout()
-            for _ in frames
-        ]
+        layouts = [self._layouts.pop(0) if self._layouts else self._empty_layout() for _ in frames]
         return [SimpleNamespace(layout=layout) for layout in layouts]
 
     def predict(
@@ -323,13 +320,17 @@ def test_layout_orientation_lock_corrects_a_both_axis_recovery_flip() -> None:
             for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
         )
         homography = (
-            (-20.0, 0.0, 280.0),
-            (0.0, -10.0, 230.0),
-            (0.0, 0.0, 1.0),
-        ) if flipped else (
-            (20.0, 0.0, 100.0),
-            (0.0, 10.0, 50.0),
-            (0.0, 0.0, 1.0),
+            (
+                (-20.0, 0.0, 280.0),
+                (0.0, -10.0, 230.0),
+                (0.0, 0.0, 1.0),
+            )
+            if flipped
+            else (
+                (20.0, 0.0, 100.0),
+                (0.0, 10.0, 50.0),
+                (0.0, 0.0, 1.0),
+            )
         )
         return CourtLayout(
             status="ok",
@@ -401,13 +402,17 @@ def test_recovery_orientation_correction_never_flips_output_sides() -> None:
             for index, (x, y) in enumerate(POSE36_CANONICAL_POINTS)
         )
         homography = (
-            (-20.0, 0.0, 280.0),
-            (0.0, -10.0, 230.0),
-            (0.0, 0.0, 1.0),
-        ) if flipped else (
-            (20.0, 0.0, 100.0),
-            (0.0, 10.0, 50.0),
-            (0.0, 0.0, 1.0),
+            (
+                (-20.0, 0.0, 280.0),
+                (0.0, -10.0, 230.0),
+                (0.0, 0.0, 1.0),
+            )
+            if flipped
+            else (
+                (20.0, 0.0, 100.0),
+                (0.0, 10.0, 50.0),
+                (0.0, 0.0, 1.0),
+            )
         )
         return CourtLayout(
             status="ok",

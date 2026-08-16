@@ -1,6 +1,6 @@
 [project]
 name = "volleyball-analysis-engine"
-version = "0.7.0"
+version = "0.8.0"
 description = "Outbound AI worker for volleyball-monitoring-ai"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
@@ -139,7 +139,6 @@ ignore = ["COM812", "CPY001", "D203", "D213", "PLR0913", "TC001", "TC002", "TC00
   "S603",
   "TRY003",
 ]
-"src/volleyball_analysis_engine/reid_features.py" = ["C901"]
 "scripts/extract_kpr_pair_features.py" = ["PLC0415"]
 "src/volleyball_analysis_engine/visual_v5.py" = [
   "ANN401",

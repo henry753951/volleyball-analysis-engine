@@ -108,10 +108,12 @@ class PersonPoseExtractor:
         raw_x1, raw_y1, raw_x2, raw_y2 = (float(value) for value in bbox)
         source: BboxObservationSource = "DETECTOR" if detector_observed else "TRACKER_PROPAGATED"
         finite = all(np.isfinite(value) for value in (raw_x1, raw_y1, raw_x2, raw_y2))
-        x1 = max(0, min(width, int(np.floor(raw_x1)))) if finite else 0
-        y1 = max(0, min(height, int(np.floor(raw_y1)))) if finite else 0
-        x2 = max(0, min(width, int(np.ceil(raw_x2)))) if finite else 0
-        y2 = max(0, min(height, int(np.ceil(raw_y2)))) if finite else 0
+        ordered_x1, ordered_x2 = sorted((raw_x1, raw_x2)) if finite else (0.0, 0.0)
+        ordered_y1, ordered_y2 = sorted((raw_y1, raw_y2)) if finite else (0.0, 0.0)
+        x1 = max(0, min(width, int(np.floor(ordered_x1))))
+        y1 = max(0, min(height, int(np.floor(ordered_y1))))
+        x2 = max(0, min(width, int(np.ceil(ordered_x2))))
+        y2 = max(0, min(height, int(np.ceil(ordered_y2))))
         frame_bbox = (x1 / width, y1 / height, x2 / width, y2 / height)
         crop_transform = (1.0 / width, 1.0 / height, x1 / width, y1 / height)
         usable = finite and x2 > x1 and y2 > y1

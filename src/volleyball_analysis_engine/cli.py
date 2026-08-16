@@ -82,7 +82,7 @@ def main(argv: list[str] | None = None) -> None:
 
 
 def worker_main() -> None:
-    """Backward-compatible worker-only console entrypoint."""
+    """Run the Provider Work worker console entrypoint."""
     main(["worker", *sys.argv[1:]])
 
 

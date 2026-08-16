@@ -6,7 +6,6 @@ from volleyball_analysis_engine.inference import (
     HarmonicMeanTracker,
     normalize_frame_bbox,
 )
-from volleyball_analysis_engine.records import ReIdEmbeddingModel
 
 
 def test_tracker_does_not_drop_people_before_court_side_filtering() -> None:
@@ -196,70 +195,6 @@ def test_tracker_does_not_use_stale_geometry_after_recovery_window() -> None:
     returned_to_same_place = tracker.update(300, box, scores, different_embedding)
 
     assert returned_to_same_place[0].track_id != first[0].track_id
-
-
-def test_tracker_aggregates_sparse_l2_prototypes_and_cannot_links() -> None:
-    tracker = HarmonicMeanTracker(match_threshold=0.2, reid_min_observations=2)
-    boxes = np.asarray(
-        [[10.0, 10.0, 30.0, 60.0], [80.0, 10.0, 100.0, 60.0]],
-        dtype=np.float32,
-    )
-    first_scores = np.asarray([0.8, 0.6], dtype=np.float32)
-    first_embeddings = np.zeros((2, 512), dtype=np.float32)
-    first_embeddings[0, 0] = 1.0
-    first_embeddings[1, 2] = 1.0
-    tracker.update(0, boxes, first_scores, first_embeddings)
-    tracker.update(1, boxes, np.asarray([0.5, 0.5], dtype=np.float32), None)
-
-    last_scores = np.asarray([0.4, 0.2], dtype=np.float32)
-    last_embeddings = np.zeros((2, 512), dtype=np.float32)
-    last_embeddings[0, 1] = 1.0
-    last_embeddings[1, 2] = 1.0
-    tracker.update(2, boxes, last_scores, last_embeddings)
-    snapshot = tracker.reid_feature_snapshot(
-        ReIdEmbeddingModel(
-            name="sports-osnet",
-            checkpoint_sha256="a" * 64,
-            preprocess_version="roi-align-rgb-imagenet-v1",
-            dimension=512,
-            distance="cosine",
-        )
-    )
-
-    assert snapshot.schema_version == "1.0.0"
-    assert len(snapshot.features) == 2
-    first, second = snapshot.features
-    assert (first.sample_count, first.first_frame_index, first.last_frame_index) == (2, 0, 2)
-    assert np.isclose(first.mean_quality, 0.6)
-    assert np.isclose(np.linalg.norm(first.prototype), 1.0)
-    assert np.allclose(first.prototype[:3], [2**-0.5, 2**-0.5, 0.0])
-    assert first.cannot_link_track_ids == (second.track_id,)
-    assert second.cannot_link_track_ids == (first.track_id,)
-    assert np.isclose(np.linalg.norm(second.prototype), 1.0)
-
-
-def test_tracker_omits_short_or_tiny_tracks_from_reid_bank() -> None:
-    tracker = HarmonicMeanTracker(match_threshold=0.2)
-    large_box = np.asarray([[10.0, 10.0, 30.0, 60.0]], dtype=np.float32)
-    tiny_box = np.asarray([[10.0, 10.0, 30.0, 30.0]], dtype=np.float32)
-    scores = np.asarray([0.8], dtype=np.float32)
-    embeddings = np.zeros((1, 512), dtype=np.float32)
-    embeddings[0, 0] = 1.0
-
-    for frame_index in range(11):
-        tracker.update(frame_index, large_box, scores, embeddings)
-    tracker.update(11, tiny_box, scores, embeddings)
-    snapshot = tracker.reid_feature_snapshot(
-        ReIdEmbeddingModel(
-            name="sports-osnet",
-            checkpoint_sha256="a" * 64,
-            preprocess_version="roi-align-rgb-imagenet-v1",
-            dimension=512,
-            distance="cosine",
-        )
-    )
-
-    assert snapshot.features == ()
 
 
 def test_detector_bbox_overshoot_is_clamped_to_video_coordinates() -> None:

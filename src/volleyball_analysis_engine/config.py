@@ -23,7 +23,6 @@ class Settings(BaseSettings):
     token: str = ""
     workspace: Path = Path("workspaces")
     provider_build_id: str = "volleyball-analysis-engine/0.8.0+provider-work-v2-pose"
-    provider_work_v2: bool = True
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"
@@ -31,9 +30,6 @@ class Settings(BaseSettings):
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     detector_input_scale: float = Field(default=1.0, ge=0.5, le=1.0)
     reid_every: int = Field(default=1, ge=1, le=30)
-    # Legacy v1 only. Versioned provider work runs ReID as a separate durable job.
-    nested_reid_enabled: bool = False
-    nested_reid_batch_size: int = Field(default=64, ge=1, le=256)
     # Provider Work v2 feature extraction is capability-gated for staged rollout.
     reid_feature_enabled: bool = False
     reid_association_enabled: bool = False

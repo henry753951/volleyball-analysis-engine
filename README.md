@@ -57,7 +57,8 @@ volleyball-analysis-worker --enable-reid-vlm
 ```
 
 The VLM is effective only when `VOLLYAI_REID_FEATURE_ENABLED=true`; analysis and saved every-frame
-pose evidence remain independent of it.
+pose evidence remain independent of it. `scripts/start-local-worker.ps1` and
+`scripts/run-online-worker.ps1` keep VLM disabled unless `-EnableReidVlm` is passed explicitly.
 
 ## First-time setup on this machine
 
@@ -180,7 +181,7 @@ PowerShell launcher:
 
 ```powershell
 .\scripts\run-online-worker.ps1 `
-  -CentralUrl "ws://localhost:10000/api/v1/ai/providers/ws" `
+  -CentralUrl "ws://localhost:10000/api/v2/ai/providers/ws" `
   -Token "vmai_replace-with-worker-access-token" `
   -InstanceKey "analysis-worker-local"
 ```

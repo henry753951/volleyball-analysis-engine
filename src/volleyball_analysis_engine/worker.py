@@ -5,15 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from time import perf_counter
 
 from volleyball_monitoring_ai import (
     AIJobRequest,
-    AIWorkerClient,
     IdentityPreviewJobRequest,
-    JobContext,
     ProviderAnalysisJobRequest,
-    ProviderCapabilities,
     ProviderWorkCapabilities,
     ProviderWorkContext,
     ProviderWorkerClient,
@@ -21,7 +17,6 @@ from volleyball_monitoring_ai import (
     ProviderWorkHandler,
     ReidAssociationJobRequest,
     ReidFeatureJobRequest,
-    WorkerConfig,
 )
 from volleyball_monitoring_ai.provider_work import ProviderWorkKind
 
@@ -43,37 +38,6 @@ from .reid_feature_job import (
 )
 
 LOGGER = logging.getLogger(__name__)
-
-
-def capabilities(settings: Settings) -> ProviderCapabilities:
-    """Declare the exact contract versions and temporary optional outputs."""
-    return ProviderCapabilities.model_validate(
-        {
-            "schema_version": "2.0.0",
-            "provider_name": "volleyball-analysis-engine",
-            "provider_build_id": settings.provider_build_id,
-            "supported_job_schema_versions": ["3.0.0"],
-            "supported_analysis_data_versions": ["1.0.0"],
-            "supported_analysis_modules": ["court", "tracking", "reid", "contacts"],
-            # The current pipeline always recomputes one complete AnalysisData
-            # payload. Do not advertise module reuse until source AnalysisData
-            # is actually consumed and merged by the worker.
-            "supports_selective_rerun": False,
-            "optional_extensions": {
-                "action": True,
-                "group_phase": False,
-                "confidence": True,
-                "fixed_roster_reid": True,
-            },
-            "action_taxonomies": [
-                {
-                    "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",
-                    "taxonomy_version": "1",
-                }
-            ],
-            "limits": {"max_concurrent_jobs": settings.max_concurrency},
-        }
-    )
 
 
 def provider_work_capabilities(settings: Settings) -> ProviderWorkCapabilities:
@@ -235,7 +199,10 @@ async def run_provider_work_worker(settings: Settings) -> None:
     """Run the v2 base-analysis handler with multi-artifact completion."""
     pipeline = build_pipeline(settings)
     if settings.prewarm_models:
-        await asyncio.to_thread(pipeline.prepare)
+        await asyncio.to_thread(
+            pipeline.prepare,
+            lambda progress, stage: LOGGER.info("model prewarm %.1f%% %s", progress * 100, stage),
+        )
     config_options = {
         "server_ws_url": settings.server_ws_url,
         "token": settings.token,
@@ -252,7 +219,6 @@ async def run_provider_work_worker(settings: Settings) -> None:
             NestedReidPaths(
                 dinov2_root=settings.dinov2_root,
                 dinov2_checkpoint=settings.dinov2_checkpoint,
-                pose_checkpoint=settings.pose_checkpoint,
                 kpr_python=settings.kpr_python,
                 kpr_root=settings.kpr_root,
                 kpr_checkpoint=settings.kpr_checkpoint,
@@ -283,6 +249,10 @@ async def run_provider_work_worker(settings: Settings) -> None:
         if settings.reid_feature_enabled and settings.reid_vlm_enabled
         else None
     )
+    # Model instances and the X3D streamer retain mutable CUDA/runtime state.
+    # Provider work may download or upload concurrently, but GPU inference must
+    # be serialized unless each lease owns an isolated model instance.
+    gpu_work_lock = asyncio.Lock()
 
     async def handle_analysis(context: ProviderWorkContext) -> None:
         request = ProviderAnalysisJobRequest.model_validate(context.work.request)
@@ -311,18 +281,18 @@ async def run_provider_work_worker(settings: Settings) -> None:
             )
             future.result(timeout=15)
 
-        result = await asyncio.to_thread(
-            pipeline.analyze_provider_work,
-            incoming,
-            clip_path,
-            report,
-            context.workspace / "artifacts" if settings.write_debug_artifacts else None,
-        )
+        async with gpu_work_lock:
+            result = await asyncio.to_thread(
+                pipeline.analyze_provider_work,
+                incoming,
+                clip_path,
+                report,
+                context.workspace / "artifacts" if settings.write_debug_artifacts else None,
+            )
         await context.complete(
             result_schema_version="1.0.0",
             artifacts=list(result.evidence.artifacts),
         )
-        await context.report_progress(1.0, "completed")
 
     async def handle_reid_feature(context: ProviderWorkContext) -> None:
         if feature_nested is None or feature_osnet is None:
@@ -400,21 +370,21 @@ async def run_provider_work_worker(settings: Settings) -> None:
             pose_chunks=ordered_chunks,
         )
         await context.report_progress(0.15, "extracting_reid_features_from_saved_pose")
-        result = await asyncio.to_thread(
-            build_reid_feature_artifacts,
-            request=request,
-            inputs=feature_inputs,
-            nested=feature_nested,
-            osnet=feature_osnet,
-            vlm=feature_vlm,
-            batch_size=settings.reid_feature_batch_size,
-            candidate_count=settings.reid_feature_candidate_frames,
-            top_k=settings.reid_feature_selected_frames,
-            min_gap=settings.reid_feature_min_frame_gap,
-        )
+        async with gpu_work_lock:
+            result = await asyncio.to_thread(
+                build_reid_feature_artifacts,
+                request=request,
+                inputs=feature_inputs,
+                nested=feature_nested,
+                osnet=feature_osnet,
+                vlm=feature_vlm,
+                batch_size=settings.reid_feature_batch_size,
+                candidate_count=settings.reid_feature_candidate_frames,
+                top_k=settings.reid_feature_selected_frames,
+                min_gap=settings.reid_feature_min_frame_gap,
+            )
         await context.report_progress(0.92, "uploading_reid_feature_evidence")
         await context.complete(result_schema_version="1.0.0", artifacts=list(result.artifacts))
-        await context.report_progress(1.0, "completed")
 
     async def handle_reid_association(context: ProviderWorkContext) -> None:
         request = ReidAssociationJobRequest.model_validate(context.work.request)
@@ -483,7 +453,6 @@ async def run_provider_work_worker(settings: Settings) -> None:
             ),
         )
         await context.complete(result_schema_version="1.0.0", artifacts=list(result.artifacts))
-        await context.report_progress(1.0, "completed")
 
     async def handle_identity_preview(context: ProviderWorkContext) -> None:
         request = IdentityPreviewJobRequest.model_validate(context.work.request)
@@ -540,7 +509,6 @@ async def run_provider_work_worker(settings: Settings) -> None:
             ),
         )
         await context.complete(result_schema_version="1.0.0", artifacts=list(result.artifacts))
-        await context.report_progress(1.0, "completed")
 
     handlers: dict[ProviderWorkKind, ProviderWorkHandler] = {"ANALYSIS": handle_analysis}
     if settings.reid_feature_enabled:
@@ -553,92 +521,13 @@ async def run_provider_work_worker(settings: Settings) -> None:
 
 
 async def run_worker(settings: Settings) -> None:
-    """Connect forever, accepting only central-server leased work."""
+    """Connect forever and accept only versioned Provider Work leases."""
     settings.validate_online()
-    if settings.provider_work_v2:
-        await run_provider_work_worker(settings)
-        return
-    pipeline = build_pipeline(settings)
-    if settings.prewarm_models:
-        await asyncio.to_thread(pipeline.prepare)
-    worker_config = (
-        WorkerConfig(
-            server_ws_url=settings.server_ws_url,
-            token=settings.token,
-            workspace=settings.workspace,
-            provider_build_id=settings.provider_build_id,
-            capabilities=capabilities(settings),
-            max_concurrency=settings.max_concurrency,
-            instance_id=settings.instance_id,
-        )
-        if settings.instance_id is not None
-        else WorkerConfig(
-            server_ws_url=settings.server_ws_url,
-            token=settings.token,
-            workspace=settings.workspace,
-            provider_build_id=settings.provider_build_id,
-            capabilities=capabilities(settings),
-            max_concurrency=settings.max_concurrency,
-        )
-    )
-    client = AIWorkerClient(worker_config)
-
-    async def handle(context: JobContext) -> None:
-        download_started = perf_counter()
-        clip_path = await context.download_clip()
-        download_seconds = perf_counter() - download_started
-        loop = asyncio.get_running_loop()
-
-        def report(progress: float, stage: str) -> None:
-            future = asyncio.run_coroutine_threadsafe(
-                context.report_progress(progress, stage),
-                loop,
-            )
-            future.result(timeout=15)
-
-        analysis_started = perf_counter()
-        bundle = await asyncio.to_thread(
-            pipeline.analyze,
-            context.job,
-            clip_path,
-            report,
-            context.workspace / "artifacts" if settings.write_debug_artifacts else None,
-        )
-        analysis_seconds = perf_counter() - analysis_started
-        complete_started = perf_counter()
-        await context.complete(bundle)
-        complete_seconds = perf_counter() - complete_started
-        LOGGER.info(
-            "job timing download=%.3fs analysis=%.3fs complete=%.3fs total=%.3fs",
-            download_seconds,
-            analysis_seconds,
-            complete_seconds,
-            download_seconds + analysis_seconds + complete_seconds,
-        )
-        await context.report_progress(1.0, "completed")
-
-    await client.run_forever(handle)
+    await run_provider_work_worker(settings)
 
 
 def build_pipeline(settings: Settings) -> AnalysisPipeline:
     """Build the single model pipeline shared by online and offline entrypoints."""
-    nested_reid = (
-        NestedPartDescriptorExtractor(
-            NestedReidPaths(
-                dinov2_root=settings.dinov2_root,
-                dinov2_checkpoint=settings.dinov2_checkpoint,
-                pose_checkpoint=settings.pose_checkpoint,
-                kpr_python=settings.kpr_python,
-                kpr_root=settings.kpr_root,
-                kpr_checkpoint=settings.kpr_checkpoint,
-                kpr_bridge=settings.kpr_bridge,
-            ),
-            device=settings.device,
-            batch_size=settings.nested_reid_batch_size,
-        )
-        if settings.nested_reid_enabled
-        else None
-    )
     person_pose = (
         PersonPoseExtractor(
             settings.pose_checkpoint,
@@ -674,7 +563,6 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         court_max_hold_frames=settings.court_max_hold_frames,
         court_decoder=settings.court_decoder,
         disable_amp=settings.disable_amp,
-        nested_reid=nested_reid,
         person_pose=person_pose,
     )
     return AnalysisPipeline(provider, PipelineConfig())

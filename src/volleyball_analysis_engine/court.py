@@ -272,9 +272,7 @@ class CourtVideoProcessor:
         if should_infer and layout is None:
             return {}
         output_layout = (
-            None
-            if tracked is None
-            else self._reorient_layout(tracked, self._output_orientation)
+            None if tracked is None else self._reorient_layout(tracked, self._output_orientation)
         )
         court = self._court_frame(frame_index, output_layout)
         if court is None:
@@ -324,9 +322,7 @@ class CourtVideoProcessor:
         if accepted is None:
             return None
         output_layout = (
-            None
-            if tracked is None
-            else self._reorient_layout(tracked, self._output_orientation)
+            None if tracked is None else self._reorient_layout(tracked, self._output_orientation)
         )
         court = self._court_frame(frame_index, output_layout)
         if court is not None:
@@ -485,8 +481,7 @@ class CourtVideoProcessor:
         homography = layout.homography
         if homography is not None:
             normalized = (
-                np.asarray(homography, dtype=np.float64)
-                @ _ORIENTATION_TRANSFORMS[orientation]
+                np.asarray(homography, dtype=np.float64) @ _ORIENTATION_TRANSFORMS[orientation]
             )
             homography = tuple(tuple(float(value) for value in row) for row in normalized)
         return replace(

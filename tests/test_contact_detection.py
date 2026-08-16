@@ -9,10 +9,7 @@ def ball(frame: int, x: float, y: float, confidence: float = 0.95) -> BallObserv
 
 
 def test_detects_abrupt_direction_change_and_preserves_canonical_frame() -> None:
-    balls = {
-        frame: ball(frame, frame / 100, (frame / 100) ** 2)
-        for frame in range(20)
-    }
+    balls = {frame: ball(frame, frame / 100, (frame / 100) ** 2) for frame in range(20)}
     for frame in range(20, 41):
         balls[frame] = ball(frame, 0.4 - (frame - 20) / 80, 0.04 + (frame - 20) / 120)
     proposals = detect_contact_proposals(
@@ -30,8 +27,7 @@ def test_detects_abrupt_direction_change_and_preserves_canonical_frame() -> None
 
 def test_rejects_smooth_parabola_and_sparse_gaps() -> None:
     smooth = {
-        frame: ball(frame, frame / 100, 0.2 + (frame - 20) ** 2 / 10_000)
-        for frame in range(41)
+        frame: ball(frame, frame / 100, 0.2 + (frame - 20) ** 2 / 10_000) for frame in range(41)
     }
     sparse = {frame: smooth[frame] for frame in range(0, 41, 8)}
     assert detect_contact_proposals(smooth, start_frame=0, end_frame=40, fps=60) == []
@@ -55,13 +51,16 @@ def test_nms_excludes_existing_human_anchor_neighborhood() -> None:
     balls = {frame: ball(frame, frame / 100, frame / 200) for frame in range(41)}
     for frame in range(20, 41):
         balls[frame] = ball(frame, 0.2 - (frame - 20) / 100, 0.1)
-    assert detect_contact_proposals(
-        balls,
-        start_frame=0,
-        end_frame=40,
-        fps=60,
-        protected_frames={20},
-    ) == []
+    assert (
+        detect_contact_proposals(
+            balls,
+            start_frame=0,
+            end_frame=40,
+            fps=60,
+            protected_frames={20},
+        )
+        == []
+    )
 
 
 def test_nms_suppresses_delayed_breakpoint_near_human_anchor() -> None:
@@ -69,10 +68,13 @@ def test_nms_suppresses_delayed_breakpoint_near_human_anchor() -> None:
     for frame in range(20, 41):
         balls[frame] = ball(frame, 0.4 - (frame - 20) / 80, 0.04 + (frame - 20) / 120)
 
-    assert detect_contact_proposals(
-        balls,
-        start_frame=0,
-        end_frame=40,
-        fps=60,
-        protected_frames={35},
-    ) == []
+    assert (
+        detect_contact_proposals(
+            balls,
+            start_frame=0,
+            end_frame=40,
+            fps=60,
+            protected_frames={35},
+        )
+        == []
+    )

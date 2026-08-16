@@ -21,9 +21,7 @@ def test_action_highlight_uses_contact_anchor_not_actor_observation_frame() -> N
     ]
 
     assert _action_states_for_frame(events, frame_index=16, fps=30.0) == {}
-    assert _action_states_for_frame(events, frame_index=20, fps=30.0) == {
-        7: ("setting", True)
-    }
+    assert _action_states_for_frame(events, frame_index=20, fps=30.0) == {7: ("setting", True)}
 
 
 def test_preview_frames_match_contract_lab_visual_milestones() -> None:
@@ -78,8 +76,7 @@ def test_accepted_court_draws_complete_virtual_lines() -> None:
         frame_index=0,
         available=True,
         keypoints=tuple(
-            CourtKeypoint(index, position, 1.0, None)
-            for index, position in enumerate(positions)
+            CourtKeypoint(index, position, 1.0, None) for index, position in enumerate(positions)
         ),
     )
 

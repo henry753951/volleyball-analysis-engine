@@ -173,8 +173,7 @@ def detect_contact_proposals(
     samples = [
         ball
         for frame, ball in sorted(balls.items())
-        if start_frame < frame < end_frame
-        and (ball.confidence or 0.0) >= MIN_BALL_CONFIDENCE
+        if start_frame < frame < end_frame and (ball.confidence or 0.0) >= MIN_BALL_CONFIDENCE
     ]
     maximum_gap = max(2, round(fps * 0.05))
     radius = max(6, round(fps * 0.18))
@@ -198,8 +197,7 @@ def detect_contact_proposals(
         if any(abs(proposal.frame_index - frame) <= protected_gap for frame in protected):
             continue
         if any(
-            abs(proposal.frame_index - current.frame_index) <= minimum_gap
-            for current in selected
+            abs(proposal.frame_index - current.frame_index) <= minimum_gap for current in selected
         ):
             continue
         selected.append(proposal)

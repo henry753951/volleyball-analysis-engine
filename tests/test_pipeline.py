@@ -129,7 +129,17 @@ class FakeProvider:
             frame_height=100,
             fps=60.0,
             reid_feature_snapshot=feature_snapshot({1: (0, 1), 7: (2, 2)}),
-            metadata={"provider": "fake"},
+            metadata={
+                "provider": "fake",
+                "person_pose_recipe": {
+                    "namespace": "pose/test/every-frame-v1",
+                    "model_name": "pose-test",
+                    "checkpoint_sha256": "b" * 64,
+                    "preprocess_version": "crop-v1",
+                    "keypoint_layout": "COCO_17",
+                    "coordinate_space": "NORMALIZED_VIDEO",
+                },
+            },
         )
 
 
@@ -154,9 +164,7 @@ class ManyPlayersProvider(FakeProvider):
                     frame_bbox=(0.04 * track_id, 0.2, 0.04 * track_id + 0.03, 0.7),
                     frame_foot_pos=(0.04 * track_id + 0.015, 0.7),
                     court_pos=(
-                        (0.75, 0.5)
-                        if frame == 0 and track_id == 7
-                        else (0.04 * track_id, 0.5)
+                        (0.75, 0.5) if frame == 0 and track_id == 7 else (0.04 * track_id, 0.5)
                     ),
                     confidence=0.9,
                 )
@@ -317,7 +325,7 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_analysis_da
     clip.write_bytes(b"unit-test")
     bundle = AnalysisPipeline(FakeProvider()).analyze(incoming, clip)
     assert bundle.domain.schema_version == "1.0.0"
-    assert bundle.domain.producer.sdk_version == "0.4.0"
+    assert bundle.domain.producer.sdk_version == "0.5.0"
     assert [event.anchor_frame_index for event in bundle.domain.contact_events] == ["0", "2"]
     assert bundle.domain.path_segments[0].start_frame_index == "0"
     assert bundle.domain.path_segments[0].end_frame_index == "2"
@@ -356,6 +364,24 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_analysis_da
     assert action is not None
     assert action.label == "setting"
     validate_analysis_data_bytes(bundle.analysis_data_bytes)
+
+
+def test_provider_work_base_analysis_does_not_build_or_publish_reid_bank(
+    tmp_path: Path,
+) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"unit-test")
+
+    with patch("volleyball_analysis_engine.pipeline.build_reid_feature_bank") as build_bank:
+        result = AnalysisPipeline(FakeProvider()).analyze_provider_work(job(), clip)
+
+    build_bank.assert_not_called()
+    assert result.bundle.domain.extensions["provider_work_boundary"] == (
+        "base-analysis-without-identity"
+    )
+    assert "reid" not in result.bundle.domain.extensions
+    assert "fixed_roster_reid" not in result.bundle.domain.extensions
+    assert result.evidence.manifest.analysis_run_id == result.bundle.domain.analysis_id
 
 
 def test_pipeline_does_not_generate_contact_proposals_over_manual_markers(

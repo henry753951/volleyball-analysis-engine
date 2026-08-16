@@ -1788,7 +1788,7 @@ provides-extras = ["cpu", "cu130", "dev", "models"]
 
 [[package]]
 name = "volleyball-monitoring-ai-sdk"
-version = "0.4.0"
+version = "0.5.0"
 source = { directory = "../volleyball-monitoring-ai/sdk" }
 dependencies = [
     { name = "flatbuffers" },
@@ -1811,6 +1811,9 @@ requires-dist = [
     { name = "websockets", specifier = ">=14,<17" },
 ]
 provides-extras = ["provider", "test"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "ruff", specifier = "==0.15.22" }]
 
 [[package]]
 name = "websockets"

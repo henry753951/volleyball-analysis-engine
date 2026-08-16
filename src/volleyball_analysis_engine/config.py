@@ -19,10 +19,11 @@ class Settings(BaseSettings):
         validate_default=True,
     )
 
-    server_ws_url: str = "ws://localhost:4000/api/v1/ai/providers/ws"
+    server_ws_url: str = "ws://localhost:4000/api/v2/ai/providers/ws"
     token: str = ""
     workspace: Path = Path("workspaces")
-    provider_build_id: str = "volleyball-analysis-engine/0.7.0+nested-part-fixed-roster"
+    provider_build_id: str = "volleyball-analysis-engine/0.8.0+provider-work-v2-pose"
+    provider_work_v2: bool = True
     instance_id: str | None = None
     max_concurrency: int = Field(default=1, ge=1, le=64)
     device: str = "cuda:0"
@@ -30,8 +31,27 @@ class Settings(BaseSettings):
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     detector_input_scale: float = Field(default=1.0, ge=0.5, le=1.0)
     reid_every: int = Field(default=1, ge=1, le=30)
-    nested_reid_enabled: bool = True
+    # Legacy v1 only. Versioned provider work runs ReID as a separate durable job.
+    nested_reid_enabled: bool = False
     nested_reid_batch_size: int = Field(default=64, ge=1, le=256)
+    # Provider Work v2 feature extraction is capability-gated for staged rollout.
+    reid_feature_enabled: bool = False
+    reid_association_enabled: bool = False
+    identity_preview_enabled: bool = False
+    reid_feature_batch_size: int = Field(default=32, ge=1, le=256)
+    reid_feature_candidate_frames: int = Field(default=60, ge=6, le=240)
+    reid_feature_selected_frames: int = Field(default=6, ge=1, le=24)
+    reid_feature_min_frame_gap: int = Field(default=8, ge=1, le=120)
+    reid_vlm_enabled: bool = False
+    reid_vlm_model_id: str = "Qwen/Qwen3-VL-8B-Instruct"
+    reid_vlm_dtype: Literal["bfloat16", "float16"] = "bfloat16"
+    reid_vlm_max_new_tokens: int = Field(default=300, ge=64, le=2048)
+    person_pose_enabled: bool = True
+    person_pose_batch_size: int = Field(default=32, ge=1, le=256)
+    person_pose_imgsz: int = Field(default=640, ge=320, le=2048)
+    person_pose_confidence: float = Field(default=0.15, ge=0.0, le=1.0)
+    person_pose_keypoint_confidence: float = Field(default=0.3, ge=0.0, le=1.0)
+    person_pose_minimum_keypoints: int = Field(default=4, ge=1, le=17)
     court_model: str = "v3"
     court_imgsz: int = Field(default=512, ge=320, le=2048)
     court_batch_size: int = Field(default=16, ge=1, le=64)

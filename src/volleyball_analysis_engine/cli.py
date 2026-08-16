@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import shutil
+import sys
 from pathlib import Path
 from time import perf_counter
 from typing import Any
@@ -28,7 +29,23 @@ from .worker import build_pipeline, run_worker
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="volleyball-analysis")
     subcommands = parser.add_subparsers(dest="command", required=True)
-    subcommands.add_parser("worker", help="connect to the central system and process leased jobs")
+    worker = subcommands.add_parser(
+        "worker", help="connect to the central system and process leased jobs"
+    )
+    vlm_group = worker.add_mutually_exclusive_group()
+    vlm_group.add_argument(
+        "--enable-reid-vlm",
+        dest="reid_vlm_enabled",
+        action="store_true",
+        default=None,
+        help="enable the optional jersey-number VLM inside ReID feature work",
+    )
+    vlm_group.add_argument(
+        "--disable-reid-vlm",
+        dest="reid_vlm_enabled",
+        action="store_false",
+        help="disable VLM loading and VLM capability advertisement",
+    )
     offline = subcommands.add_parser("offline", help="infer one local clip without network access")
     offline.add_argument("--job", type=Path, required=True)
     offline.add_argument("--clip", type=Path, required=True)
@@ -53,7 +70,7 @@ def main(argv: list[str] | None = None) -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
     arguments = _parser().parse_args(argv)
-    settings = Settings()
+    settings = _settings_from_arguments(arguments)
     if arguments.command == "worker":
         asyncio.run(run_worker(settings))
         return
@@ -66,7 +83,16 @@ def main(argv: list[str] | None = None) -> None:
 
 def worker_main() -> None:
     """Backward-compatible worker-only console entrypoint."""
-    main(["worker"])
+    main(["worker", *sys.argv[1:]])
+
+
+def _settings_from_arguments(arguments: argparse.Namespace) -> Settings:
+    """Load environment settings and apply explicit worker CLI overrides."""
+    settings = Settings()
+    reid_vlm_enabled = getattr(arguments, "reid_vlm_enabled", None)
+    if reid_vlm_enabled is not None:
+        settings = settings.model_copy(update={"reid_vlm_enabled": reid_vlm_enabled})
+    return settings
 
 
 async def _run_offline(settings: Settings, arguments: argparse.Namespace) -> None:

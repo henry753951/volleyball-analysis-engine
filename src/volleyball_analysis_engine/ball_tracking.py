@@ -71,8 +71,9 @@ class BallTrajectoryTracker:
             return None
         selected = min(
             eligible,
-            key=lambda index: distances[index] / max(gate, 1e-9)
-            + 0.35 * (1.0 - float(confidences[index])),
+            key=lambda index: (
+                distances[index] / max(gate, 1e-9) + 0.35 * (1.0 - float(confidences[index]))
+            ),
         )
         return self._accept(frame_index, candidates, confidences, selected)
 

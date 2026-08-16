@@ -45,6 +45,20 @@ H:\Repos\
 Model files and the supplied RT-DETRv4 source are prepared under ignored `.artifacts/`; weights are
 never committed.
 
+### Optional ReID VLM
+
+The jersey-number VLM is opt-in. Leave `VOLLYAI_REID_VLM_ENABLED=false` to avoid loading the
+model and to omit its artifact kind and model recipe from Worker capability registration. The
+worker command can override the environment for one process:
+
+```powershell
+volleyball-analysis worker --disable-reid-vlm
+volleyball-analysis-worker --enable-reid-vlm
+```
+
+The VLM is effective only when `VOLLYAI_REID_FEATURE_ENABLED=true`; analysis and saved every-frame
+pose evidence remain independent of it.
+
 ## First-time setup on this machine
 
 The defaults point at the assets supplied for this project:

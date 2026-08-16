@@ -22,10 +22,12 @@ from volleyball_monitoring_ai import AIJobRequest
 from .ball_tracking import BallTrajectoryTracker
 from .court import CourtLineEstimator, interpolate_short_court_gaps
 from .nested_reid import NestedPartDescriptorExtractor
+from .person_pose import PersonPoseExtractor
 from .records import (
     ActionObservation,
     BallObservation,
     CourtFrame,
+    PersonPoseObservation,
     PlayerObservation,
     ReIdEmbeddingModel,
     ReIdFeatureSnapshot,
@@ -88,6 +90,10 @@ def _empty_metadata() -> dict[str, Any]:
     return {}
 
 
+def _empty_poses() -> dict[int, tuple[PersonPoseObservation, ...]]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class InferenceResult:
     """All model-owned observations for one canonical clip."""
@@ -101,6 +107,7 @@ class InferenceResult:
     frame_height: int
     fps: float
     reid_feature_snapshot: ReIdFeatureSnapshot
+    poses: dict[int, tuple[PersonPoseObservation, ...]] = field(default_factory=_empty_poses)
     metadata: dict[str, Any] = field(default_factory=_empty_metadata)
 
 
@@ -164,10 +171,12 @@ class _DetectorObservations:
     players: tuple[PlayerObservation, ...]
     ball: BallObservation | None
     actions: tuple[ActionObservation, ...]
+    poses: tuple[PersonPoseObservation, ...]
     detector_seconds: float
     postprocess_seconds: float
     embedding_seconds: float
     tracking_seconds: float
+    pose_seconds: float
 
 
 class HarmonicMeanTracker:
@@ -540,6 +549,7 @@ class Rtv4X3DObservationProvider:
         court_decoder: str = "auto",
         disable_amp: bool = False,
         nested_reid: NestedPartDescriptorExtractor | None = None,
+        person_pose: PersonPoseExtractor | None = None,
     ) -> None:
         paths.validate()
         self.paths = paths
@@ -558,6 +568,7 @@ class Rtv4X3DObservationProvider:
         self.court_decoder = court_decoder
         self.disable_amp = disable_amp
         self.nested_reid = nested_reid
+        self.person_pose = person_pose
         self._torch: Any = None
         self._model: Any = None
         self._postprocessor: Any = None
@@ -615,6 +626,7 @@ class Rtv4X3DObservationProvider:
         courts: dict[int, CourtFrame] = {}
         balls: dict[int, BallObservation] = {}
         actions: dict[tuple[int, int], ActionObservation] = {}
+        poses: dict[int, tuple[PersonPoseObservation, ...]] = {}
         court_processor = self._court_estimator.begin_video()
         timings = {
             "decode_seconds": 0.0,
@@ -623,6 +635,7 @@ class Rtv4X3DObservationProvider:
             "postprocess_seconds": 0.0,
             "embedding_seconds": 0.0,
             "tracking_seconds": 0.0,
+            "pose_seconds": 0.0,
         }
         inference_started = perf_counter()
         frame_index = 0
@@ -647,7 +660,9 @@ class Rtv4X3DObservationProvider:
                 timings["postprocess_seconds"] += observed.postprocess_seconds
                 timings["embedding_seconds"] += observed.embedding_seconds
                 timings["tracking_seconds"] += observed.tracking_seconds
+                timings["pose_seconds"] += observed.pose_seconds
                 players[frame_index] = observed.players
+                poses[frame_index] = observed.poses
                 if observed.ball is not None:
                     balls[frame_index] = observed.ball
                 for action in observed.actions:
@@ -683,6 +698,7 @@ class Rtv4X3DObservationProvider:
             frame_height=height,
             fps=fps,
             reid_feature_snapshot=reid_snapshot,
+            poses=poses,
             metadata={
                 "detector": "RT-DETRv4+X3D",
                 "detector_config": str(self.paths.rtv4_config),
@@ -691,6 +707,9 @@ class Rtv4X3DObservationProvider:
                 "detector_input_scale": self.detector_input_scale,
                 "reid_every": self.reid_every,
                 "tracker": "harmonic-mean-eiou+OSNet-run-local",
+                "person_pose_recipe": (
+                    self.person_pose.recipe_metadata if self.person_pose is not None else None
+                ),
                 "court_detector": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
                 "court_model": self._court_estimator.model_name,
                 "streaming_backend": self._effective_backend,
@@ -711,6 +730,8 @@ class Rtv4X3DObservationProvider:
         self._load_models(report or (lambda _progress, _stage: None))
         if self.nested_reid is not None:
             self.nested_reid.prepare()
+        if self.person_pose is not None:
+            self.person_pose.prepare()
 
     def _load_models(self, report: ProgressReporter) -> None:
         if self._model is not None:
@@ -898,6 +919,42 @@ class Rtv4X3DObservationProvider:
         )
         tracking_seconds = perf_counter() - started
 
+        started = perf_counter()
+        if self.person_pose is not None:
+            poses = self.person_pose.infer_frame(
+                frame,
+                frame_index=frame_index,
+                tracks=[(item.track_id, item.bbox, item.detection_index >= 0) for item in tracked],
+            )
+        else:
+            poses = tuple(
+                PersonPoseObservation(
+                    frame_index=frame_index,
+                    track_id=item.track_id,
+                    bbox_source=("DETECTOR" if item.detection_index >= 0 else "TRACKER_PROPAGATED"),
+                    frame_bbox=normalize_frame_bbox(
+                        (
+                            float(item.bbox[0]),
+                            float(item.bbox[1]),
+                            float(item.bbox[2]),
+                            float(item.bbox[3]),
+                        ),
+                        width=width,
+                        height=height,
+                    ),
+                    crop_transform=(
+                        1.0 / width,
+                        1.0 / height,
+                        max(0.0, float(item.bbox[0]) / width),
+                        max(0.0, float(item.bbox[1]) / height),
+                    ),
+                    status="INFERENCE_FAILED",
+                    keypoints=None,
+                )
+                for item in tracked
+            )
+        pose_seconds = perf_counter() - started
+
         players: list[PlayerObservation] = []
         actions: list[ActionObservation] = []
         for item in tracked:
@@ -959,10 +1016,12 @@ class Rtv4X3DObservationProvider:
             players=tuple(players),
             ball=ball,
             actions=tuple(actions),
+            poses=poses,
             detector_seconds=detector_seconds,
             postprocess_seconds=postprocess_seconds,
             embedding_seconds=embedding_seconds,
             tracking_seconds=tracking_seconds,
+            pose_seconds=pose_seconds,
         )
 
     def _infer_detector(self, frame: NDArray[np.uint8], width: int, height: int) -> Any:

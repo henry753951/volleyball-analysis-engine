@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import pairwise
 from pathlib import Path
 from typing import Any, cast
@@ -24,6 +24,7 @@ from volleyball_monitoring_ai.models import KeyPointInput
 from .artifacts import write_inference_artifacts
 from .association import associate_hit
 from .contact_detection import detect_contact_proposals
+from .evidence_artifacts import AnalysisEvidenceArtifacts, build_analysis_evidence_artifacts
 from .geometry import estimate_homography, project_normalized_frame_point
 from .inference import ObservationProvider
 from .records import (
@@ -31,6 +32,7 @@ from .records import (
     BallObservation,
     CourtFrame,
     FrameObservation,
+    PersonPoseObservation,
     PlayerObservation,
 )
 from .reid_features import build_reid_feature_bank, resolve_track_court_sides
@@ -63,6 +65,20 @@ class _EventSpec:
     detection: dict[str, str | float] | None
 
 
+@dataclass(frozen=True, slots=True)
+class AnalysisProviderWorkResult:
+    """AnalysisData and every immutable output required by Provider Work v2."""
+
+    bundle: AnalysisDataBundle
+    evidence: AnalysisEvidenceArtifacts
+
+
+@dataclass(frozen=True, slots=True)
+class _AnalysisExecution:
+    bundle: AnalysisDataBundle
+    evidence: AnalysisEvidenceArtifacts | None
+
+
 class AnalysisPipeline:
     """Produce one contract-valid AnalysisData artifact for an incoming job."""
 
@@ -90,6 +106,44 @@ class AnalysisPipeline:
         report: ProgressReporter | None = None,
         artifact_dir: Path | None = None,
     ) -> AnalysisDataBundle:
+        """Run the legacy-compatible AnalysisData-only entrypoint."""
+        return self._analyze(
+            job,
+            clip_path,
+            report=report,
+            artifact_dir=artifact_dir,
+            include_evidence=False,
+        ).bundle
+
+    def analyze_provider_work(
+        self,
+        job: AIJobRequest,
+        clip_path: Path,
+        report: ProgressReporter | None = None,
+        artifact_dir: Path | None = None,
+    ) -> AnalysisProviderWorkResult:
+        """Run base analysis and emit independently reusable every-frame evidence."""
+        execution = self._analyze(
+            job,
+            clip_path,
+            report=report,
+            artifact_dir=artifact_dir,
+            include_evidence=True,
+        )
+        if execution.evidence is None:
+            message = "provider analysis did not create required evidence"
+            raise RuntimeError(message)
+        return AnalysisProviderWorkResult(bundle=execution.bundle, evidence=execution.evidence)
+
+    def _analyze(
+        self,
+        job: AIJobRequest,
+        clip_path: Path,
+        *,
+        report: ProgressReporter | None,
+        artifact_dir: Path | None,
+        include_evidence: bool,
+    ) -> _AnalysisExecution:
         """Analyze one canonical clip while preserving every immutable anchor."""
         reporter: ProgressReporter = report or _noop_progress
         inferred = self.provider.infer(clip_path, job, reporter)
@@ -110,18 +164,21 @@ class AnalysisPipeline:
         )
         balls = self._map_balls(inferred.balls, source_last_frame, destination_frames)
         actions = self._map_actions(inferred.actions, source_last_frame, destination_frames)
+        poses = self._map_poses(inferred.poses, source_last_frame, destination_frames)
 
-        reporter(0.76, "reid_feature_bank")
-        reid_feature_bank = build_reid_feature_bank(
-            inferred.reid_feature_snapshot,
-            frames,
-            map_frame=lambda frame_index: self._map_frame(
-                frame_index,
-                source_last_frame,
-                destination_frames,
-            ),
-            descriptor_recipe=inferred.reid_feature_snapshot.descriptor_recipe or {},
-        )
+        reid_feature_bank: dict[str, object] | None = None
+        if not include_evidence:
+            reporter(0.76, "legacy_reid_feature_bank")
+            reid_feature_bank = build_reid_feature_bank(
+                inferred.reid_feature_snapshot,
+                frames,
+                map_frame=lambda frame_index: self._map_frame(
+                    frame_index,
+                    source_last_frame,
+                    destination_frames,
+                ),
+                descriptor_recipe=inferred.reid_feature_snapshot.descriptor_recipe or {},
+            )
         players_by_frame = {frame.frame_index: frame.players for frame in frames}
 
         reporter(0.82, "hit_association")
@@ -131,6 +188,7 @@ class AnalysisPipeline:
             players_by_frame,
             homographies,
             actions=actions,
+            poses=poses,
             frame_width=inferred.frame_width,
             frame_height=inferred.frame_height,
         )
@@ -142,6 +200,25 @@ class AnalysisPipeline:
         unresolved = sum(
             event["association_state"] in {"ambiguous", "unresolved"} for event in events
         )
+        extensions: dict[str, object] = {
+            "inference_source": "canonical_clip",
+            "court_detection": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
+            "tracking": "harmonic-mean-eiou+OSNet",
+            "action_source": "RT-DETRv4-X3D",
+            "provider_metadata": inferred.metadata,
+            "contact_suggestions": contact_suggestions,
+            "decoded_source_frame_count": source_last_frame + 1,
+            "canonical_frame_count": destination_frames,
+        }
+        if include_evidence:
+            extensions["provider_work_boundary"] = "base-analysis-without-identity"
+        elif reid_feature_bank is not None:
+            extensions.update(
+                {
+                    "reid": "nested-part-adaptation-fixed-roster-v2",
+                    "fixed_roster_reid": reid_feature_bank,
+                }
+            )
         domain = AnalysisDomainData.model_validate(
             {
                 "schema_version": "1.0.0",
@@ -157,7 +234,7 @@ class AnalysisPipeline:
                 "producer": {
                     "name": "volleyball-analysis-engine",
                     "build_id": self.analysis_version,
-                    "sdk_version": "0.4.0",
+                    "sdk_version": "0.5.0",
                 },
                 "tracks": tracks,
                 "contact_events": events,
@@ -170,18 +247,7 @@ class AnalysisPipeline:
                     "multiple_event_count": 0,
                     "warnings": [],
                 },
-                "extensions": {
-                    "inference_source": "canonical_clip",
-                    "court_detection": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
-                    "tracking": "harmonic-mean-eiou+OSNet",
-                    "reid": "nested-part-adaptation-fixed-roster-v2",
-                    "fixed_roster_reid": reid_feature_bank,
-                    "action_source": "RT-DETRv4-X3D",
-                    "provider_metadata": inferred.metadata,
-                    "contact_suggestions": contact_suggestions,
-                    "decoded_source_frame_count": source_last_frame + 1,
-                    "canonical_frame_count": destination_frames,
-                },
+                "extensions": extensions,
             }
         )
         validate_passthrough(job, domain)
@@ -222,8 +288,37 @@ class AnalysisPipeline:
             action_taxonomy_id="volleyball-analysis-engine.rtv4-x3d-actions",
             action_taxonomy_version="1",
         )
+        evidence: AnalysisEvidenceArtifacts | None = None
+        if include_evidence:
+            raw_pose_recipe = inferred.metadata.get("person_pose_recipe")
+            candidate_recipe = (
+                cast("dict[object, object]", raw_pose_recipe)
+                if isinstance(raw_pose_recipe, dict)
+                else {}
+            )
+            if not candidate_recipe or not all(
+                isinstance(key, str) and isinstance(value, str)
+                for key, value in candidate_recipe.items()
+            ):
+                message = "Provider Work analysis requires an immutable person pose recipe"
+                raise ValueError(message)
+            pose_recipe = {
+                key: value
+                for key, value in candidate_recipe.items()
+                if isinstance(key, str) and isinstance(value, str)
+            }
+            evidence = build_analysis_evidence_artifacts(
+                job=job,
+                analysis_run_id=analysis_id,
+                analysis_data_bytes=analysis_data,
+                poses=poses,
+                pose_recipe=pose_recipe,
+            )
         reporter(0.98, "analysis_data_ready")
-        return AnalysisDataBundle(domain=domain, analysis_data_bytes=analysis_data)
+        return _AnalysisExecution(
+            bundle=AnalysisDataBundle(domain=domain, analysis_data_bytes=analysis_data),
+            evidence=evidence,
+        )
 
     def _project_frames(
         self,
@@ -322,6 +417,38 @@ class AnalysisPipeline:
                 mapped[key] = candidate
         return mapped
 
+    @classmethod
+    def _map_poses(
+        cls,
+        source: dict[int, tuple[PersonPoseObservation, ...]],
+        source_last_frame: int,
+        destination_frames: int,
+    ) -> dict[int, tuple[PersonPoseObservation, ...]]:
+        """Map evidence without interpolating or inventing a missing observation."""
+        mapped: dict[int, tuple[PersonPoseObservation, ...]] = dict.fromkeys(
+            range(destination_frames), ()
+        )
+        selected_distance: dict[int, float] = {}
+        for source_frame, observations in sorted(source.items()):
+            frame_index = cls._map_frame(
+                source_frame,
+                source_last_frame,
+                destination_frames,
+            )
+            ideal_source = (
+                0.0
+                if destination_frames <= 1
+                else frame_index * source_last_frame / (destination_frames - 1)
+            )
+            distance = abs(source_frame - ideal_source)
+            if distance >= selected_distance.get(frame_index, float("inf")):
+                continue
+            selected_distance[frame_index] = distance
+            mapped[frame_index] = tuple(
+                replace(observation, frame_index=frame_index) for observation in observations
+            )
+        return mapped
+
     @staticmethod
     def _map_frame(frame: int, source_last_frame: int, destination_frames: int) -> int:
         if source_last_frame <= 0 or destination_frames <= 1:
@@ -339,6 +466,7 @@ class AnalysisPipeline:
         homographies: dict[int, NDArray[np.float64]],
         *,
         actions: dict[tuple[int, int], ActionObservation],
+        poses: dict[int, tuple[PersonPoseObservation, ...]],
         frame_width: int,
         frame_height: int,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -423,6 +551,7 @@ class AnalysisPipeline:
                 balls=balls,
                 players=players,
                 actions=actions,
+                poses=poses,
                 frame_width=frame_width,
                 frame_height=frame_height,
                 action_search_radius=action_search_radius,
@@ -450,6 +579,7 @@ class AnalysisPipeline:
                     ),
                     "association_mode": association.mode,
                     "association_confidence": association.confidence,
+                    "association_evidence": association.evidence,
                     "actor": actor,
                     "detection": spec.detection,
                 }
@@ -474,6 +604,7 @@ class AnalysisPipeline:
                 balls=balls,
                 players=players,
                 actions=actions,
+                poses=poses,
                 frame_width=frame_width,
                 frame_height=frame_height,
                 action_search_radius=action_search_radius,
@@ -505,6 +636,15 @@ class AnalysisPipeline:
                         "confidence": action.confidence,
                         "attributes": {"source": "RT-DETRv4-X3D"},
                     }
+            event_extensions: dict[str, Any] = (
+                {
+                    "authoritative_clip_pts": spec.point.clip_pts,
+                    "authoritative_clip_time_us": spec.point.clip_time_us,
+                }
+                if spec.point is not None
+                else {"detection": spec.detection}
+            )
+            event_extensions["hitter_association"] = association.evidence
             events.append(
                 {
                     "key_point_id": spec.key_point_id,
@@ -548,14 +688,7 @@ class AnalysisPipeline:
                             else ()
                         ),
                     ],
-                    "extensions": (
-                        {
-                            "authoritative_clip_pts": spec.point.clip_pts,
-                            "authoritative_clip_time_us": spec.point.clip_time_us,
-                        }
-                        if spec.point is not None
-                        else {"detection": spec.detection}
-                    ),
+                    "extensions": event_extensions,
                 }
             )
         return events, contact_suggestions

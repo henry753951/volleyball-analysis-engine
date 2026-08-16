@@ -7,6 +7,8 @@ from typing import Literal
 
 CourtSide = Literal["left", "right", "unknown"]
 ReIdDistance = Literal["cosine"]
+PersonPoseStatus = Literal["AVAILABLE", "NO_USABLE_BBOX", "INFERENCE_FAILED", "LOW_QUALITY"]
+BboxObservationSource = Literal["DETECTOR", "TRACKER_PROPAGATED"]
 COURT_MIDLINE_X = 0.5
 
 
@@ -51,6 +53,19 @@ class PlayerObservation:
     def with_identity(self, track_id: int) -> PlayerObservation:
         """Return the observation with an analysis-local canonical identity."""
         return replace(self, track_id=track_id)
+
+
+@dataclass(frozen=True, slots=True)
+class PersonPoseObservation:
+    """Immutable COCO-17 evidence for one canonical frame/player observation."""
+
+    frame_index: int
+    track_id: int
+    bbox_source: BboxObservationSource
+    frame_bbox: tuple[float, float, float, float]
+    crop_transform: tuple[float, float, float, float]
+    status: PersonPoseStatus
+    keypoints: tuple[tuple[float, float, float], ...] | None
 
 
 @dataclass(frozen=True, slots=True)

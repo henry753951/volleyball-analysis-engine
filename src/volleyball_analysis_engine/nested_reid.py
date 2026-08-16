@@ -29,20 +29,40 @@ class NestedReidPaths:
     kpr_checkpoint: Path
     kpr_bridge: Path
 
-    def validate(self) -> None:
+    def validate(self, *, require_pose: bool = True) -> None:
         """Fail early when a frozen model or isolated runtime is unavailable."""
         required = {
             "DINOv2 source": self.dinov2_root / "hubconf.py",
             "DINOv2 checkpoint": self.dinov2_checkpoint,
-            "COCO-17 pose checkpoint": self.pose_checkpoint,
             "KPR Python 3.10": self.kpr_python,
             "Official KPR source": self.kpr_root / "torchreid" / "tools" / "feature_extractor.py",
             "Official KPR checkpoint": self.kpr_checkpoint,
             "KPR bridge": self.kpr_bridge,
         }
+        if require_pose:
+            required["COCO-17 pose checkpoint"] = self.pose_checkpoint
         missing = [f"{label}: {path}" for label, path in required.items() if not path.exists()]
         if missing:
             raise FileNotFoundError("missing Nested Part Adaptation assets:\n" + "\n".join(missing))
+
+    def validate_dino(self) -> None:
+        """Validate only the DINO assets needed by the DINO modality."""
+        required = (self.dinov2_root / "hubconf.py", self.dinov2_checkpoint)
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise FileNotFoundError("missing DINO assets:\n" + "\n".join(missing))
+
+    def validate_kpr(self) -> None:
+        """Validate only the isolated KPR assets needed by KPR modalities."""
+        required = (
+            self.kpr_python,
+            self.kpr_root / "torchreid" / "tools" / "feature_extractor.py",
+            self.kpr_checkpoint,
+            self.kpr_bridge,
+        )
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise FileNotFoundError("missing KPR assets:\n" + "\n".join(missing))
 
 
 def _normalize(value: NDArray[np.floating[Any]]) -> NDArray[np.float32]:
@@ -63,14 +83,53 @@ class NestedPartDescriptorExtractor:
         self._device: Any = None
         self._dino: Any = None
         self._pose: Any = None
+        self._kpr_runtime_validated = False
 
-    def prepare(self) -> None:
+    def prepare(self, *, load_pose: bool = True) -> None:
         """Load the in-process frozen models and validate the isolated KPR runtime."""
+        self.paths.validate(require_pose=load_pose)
+        import torch
+
+        if self._dino is None:
+            self._torch = torch
+            self._device = torch.device(self.device_name)
+            hub: Any = torch.hub
+            dino = hub.load(
+                str(self.paths.dinov2_root.resolve()),
+                "dinov2_vits14_reg",
+                source="local",
+                pretrained=False,
+            )
+            state = torch.load(
+                self.paths.dinov2_checkpoint,
+                map_location="cpu",
+                weights_only=True,
+            )
+            dino.load_state_dict(state, strict=True)
+            self._dino = dino.eval().to(self._device)
+        if load_pose and self._pose is None:
+            from ultralytics import YOLO
+
+            self._pose = cast("Any", YOLO(str(self.paths.pose_checkpoint.resolve())))
+        if not self._kpr_runtime_validated:
+            completed = subprocess.run(
+                [str(self.paths.kpr_python), "--version"],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            if "Python 3.10" not in f"{completed.stdout}{completed.stderr}":
+                raise RuntimeError(
+                    "Official KPR bridge must run in the isolated Python 3.10 runtime"
+                )
+            self._kpr_runtime_validated = True
+
+    def prepare_dino(self) -> None:
+        """Load only DINO so a KPR deployment problem cannot suppress DINO evidence."""
         if self._dino is not None:
             return
-        self.paths.validate()
+        self.paths.validate_dino()
         import torch
-        from ultralytics import YOLO
 
         self._torch = torch
         self._device = torch.device(self.device_name)
@@ -88,7 +147,12 @@ class NestedPartDescriptorExtractor:
         )
         dino.load_state_dict(state, strict=True)
         self._dino = dino.eval().to(self._device)
-        self._pose = cast("Any", YOLO(str(self.paths.pose_checkpoint.resolve())))
+
+    def validate_kpr_runtime(self) -> None:
+        """Validate KPR without loading DINO or pose."""
+        if self._kpr_runtime_validated:
+            return
+        self.paths.validate_kpr()
         completed = subprocess.run(
             [str(self.paths.kpr_python), "--version"],
             check=True,
@@ -97,6 +161,7 @@ class NestedPartDescriptorExtractor:
         )
         if "Python 3.10" not in f"{completed.stdout}{completed.stderr}":
             raise RuntimeError("Official KPR bridge must run in the isolated Python 3.10 runtime")
+        self._kpr_runtime_validated = True
 
     def recipe_metadata(
         self,
@@ -190,6 +255,54 @@ class NestedPartDescriptorExtractor:
             descriptor_recipe=self.recipe_metadata(osnet_model=snapshot.embedding_model),
         )
 
+    def encode_saved_pose(
+        self,
+        *,
+        keys: list[tuple[int, int]],
+        crops: list[NDArray[np.uint8]],
+        prompts: list[list[list[float]] | None],
+    ) -> tuple[
+        NDArray[np.float32],
+        NDArray[np.float32],
+        NDArray[np.float32],
+        NDArray[np.bool_],
+    ]:
+        """Encode selected crops while reusing persisted COCO-17 pose prompts.
+
+        This is the Provider Work v2 path. It intentionally prepares DINO/KPR
+        without loading or invoking the pose model; pose is base-analysis evidence.
+        """
+        if len(keys) != len(crops) or len(crops) != len(prompts):
+            raise ValueError("saved-pose descriptor inputs must have equal lengths")
+        if not crops:
+            raise ValueError("saved-pose descriptor extraction requires at least one crop")
+        self.prepare(load_pose=False)
+        dino = self._encode_dino(crops)
+        kpr, kpr_prompt, prompted = self._encode_kpr(keys, crops, prompts)
+        return dino, kpr, kpr_prompt, prompted
+
+    def encode_dino_crops(self, crops: list[NDArray[np.uint8]]) -> NDArray[np.float32]:
+        """Encode DINO independently of KPR and pose availability."""
+        if not crops:
+            raise ValueError("DINO descriptor extraction requires at least one crop")
+        self.prepare_dino()
+        return self._encode_dino(crops)
+
+    def encode_kpr_crops(
+        self,
+        *,
+        keys: list[tuple[int, int]],
+        crops: list[NDArray[np.uint8]],
+        prompts: list[list[list[float]] | None],
+    ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.bool_]]:
+        """Encode KPR and KPR-prompt from persisted pose without pose inference."""
+        if len(keys) != len(crops) or len(crops) != len(prompts):
+            raise ValueError("KPR saved-pose inputs must have equal lengths")
+        if not crops:
+            raise ValueError("KPR descriptor extraction requires at least one crop")
+        self.validate_kpr_runtime()
+        return self._encode_kpr(keys, crops, prompts)
+
     @staticmethod
     def _decode_crop(encoded: bytes) -> NDArray[np.uint8]:
         crop = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -260,7 +373,7 @@ class NestedPartDescriptorExtractor:
 
     def _encode_kpr(
         self,
-        rows: list[tuple[int, int, bytes, tuple[float, ...]]],
+        rows: list[tuple[Any, ...]],
         crops: list[NDArray[np.uint8]],
         prompts: list[list[list[float]] | None],
     ) -> tuple[NDArray[np.float32], NDArray[np.float32], NDArray[np.bool_]]:

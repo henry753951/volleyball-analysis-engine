@@ -20,6 +20,7 @@ from numpy.typing import NDArray
 from .records import (
     CourtSide,
     FrameObservation,
+    PlayerObservation,
     ReIdDescriptorSet,
     ReIdEmbeddingModel,
     ReIdFeatureSnapshot,
@@ -277,6 +278,15 @@ def build_reid_feature_bank(
         raise ValueError(message)
     selected_by_frame = _select_on_court_roster(frames)
     side_by_track = resolve_track_court_sides(frames, selected_by_frame=selected_by_frame)
+    # The selected-only majority can legitimately move a noisy/partially occluded
+    # track to the opposite stable side.  Re-apply the six-player capacity using
+    # that final side decision so one transient seventh detection degrades to an
+    # unselected tracklet instead of failing the complete analysis job.
+    selected_by_frame = _enforce_fixed_roster_capacity(
+        frames,
+        selected_by_frame=selected_by_frame,
+        sides=side_by_track,
+    )
     features = {feature.track_id: feature for feature in snapshot.features}
     descriptors = {descriptor.track_id: descriptor for descriptor in snapshot.descriptor_sets}
     if set(features) != set(descriptors):
@@ -543,13 +553,60 @@ def _bbox_iou(
     return intersection / union if union > 0 else 0.0
 
 
+def _roster_priority(player: PlayerObservation) -> tuple[float, float, int]:
+    court_distance = (
+        0.0
+        if player.court_pos is None
+        else max(
+            0.0,
+            -player.court_pos[0],
+            player.court_pos[0] - 1.0,
+            -player.court_pos[1],
+            player.court_pos[1] - 1.0,
+        )
+    )
+    return (
+        court_distance,
+        -(player.confidence if player.confidence is not None else -1.0),
+        player.track_id,
+    )
+
+
+def _enforce_fixed_roster_capacity(
+    frames: list[FrameObservation],
+    *,
+    selected_by_frame: dict[int, set[int]],
+    sides: dict[int, CourtSide],
+) -> dict[int, set[int]]:
+    """Limit final stable-side membership without turning a noisy seventh track fatal."""
+    constrained: dict[int, set[int]] = {}
+    for frame in frames:
+        selected = selected_by_frame[frame.frame_index]
+        by_side: dict[CourtSide, list[PlayerObservation]] = defaultdict(list)
+        for player in frame.players:
+            if player.track_id not in selected:
+                continue
+            side = sides.get(player.track_id, "unknown")
+            by_side[side].append(player)
+        kept_ids: set[int] = set()
+        for side, players in by_side.items():
+            kept = (
+                players
+                if side == "unknown" or len(players) <= _MAX_ON_COURT_PLAYERS_PER_SIDE
+                else sorted(players, key=_roster_priority)[:_MAX_ON_COURT_PLAYERS_PER_SIDE]
+            )
+            kept_ids.update(player.track_id for player in kept)
+        constrained[frame.frame_index] = kept_ids
+    return constrained
+
+
 def _select_on_court_roster(frames: list[FrameObservation]) -> dict[int, set[int]]:
     """Mirror volley-reid's per-frame six-most-central roster restriction."""
     dominant_sides = _raw_track_court_sides(frames)
     selected_by_frame: dict[int, set[int]] = {}
     for frame in frames:
         selected: set[int] = set()
-        by_side: dict[CourtSide, list[Any]] = defaultdict(list)
+        by_side: dict[CourtSide, list[PlayerObservation]] = defaultdict(list)
         for player in frame.players:
             # Roster capacity is a track-level constraint.  A single noisy court
             # projection must not put the same stable-side roster into a seventh
@@ -562,22 +619,7 @@ def _select_on_court_roster(frames: list[FrameObservation]) -> dict[int, set[int
             if side == "unknown" or len(players) <= _MAX_ON_COURT_PLAYERS_PER_SIDE:
                 kept = players
             else:
-                kept = sorted(
-                    players,
-                    key=lambda player: (
-                        0.0
-                        if player.court_pos is None
-                        else max(
-                            0.0,
-                            -player.court_pos[0],
-                            player.court_pos[0] - 1.0,
-                            -player.court_pos[1],
-                            player.court_pos[1] - 1.0,
-                        ),
-                        -(player.confidence if player.confidence is not None else -1.0),
-                        player.track_id,
-                    ),
-                )[:_MAX_ON_COURT_PLAYERS_PER_SIDE]
+                kept = sorted(players, key=_roster_priority)[:_MAX_ON_COURT_PLAYERS_PER_SIDE]
             selected.update(player.track_id for player in kept)
         selected_by_frame[frame.frame_index] = selected
     return selected_by_frame

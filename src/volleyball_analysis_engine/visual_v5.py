@@ -515,9 +515,7 @@ def _draw_ball(
         (
             event
             for event in events
-            if 0
-            <= int(event["anchor_frame_index"]) - frame_index
-            <= preview_frames
+            if 0 <= int(event["anchor_frame_index"]) - frame_index <= preview_frames
             and event.get("ball", {}).get("frame_pos")
         ),
         None,

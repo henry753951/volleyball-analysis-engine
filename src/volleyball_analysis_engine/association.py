@@ -2,13 +2,24 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
+from math import hypot
+from typing import Any
 
-from .records import ActionObservation, BallObservation, PlayerObservation
+from .records import ActionObservation, BallObservation, PersonPoseObservation, PlayerObservation
 
 COURT_MIDLINE_X = 0.5
 CONTACT_ACTION_PRIORITY = {"spiking": 0, "passing": 1, "setting": 1, "digging": 2}
 BALL_ACTION_FRAME_TOLERANCE = 3
+POSE_KEYPOINT_CONFIDENCE = 0.3
+POSE_MAX_NORMALIZED_DISTANCE = 0.45
+POSE_MIN_RUNNER_UP_MARGIN = 0.08
+POSE_TEMPORAL_PENALTY = 0.04
+SEGMENT_EPSILON = 1e-12
+
+
+def _empty_evidence() -> dict[str, Any]:
+    return {}
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +31,153 @@ class HitAssociation:
     observation_frame: int | None
     mode: str
     confidence: float | None
+    evidence: dict[str, Any] = field(default_factory=_empty_evidence)
+
+
+def _point_segment_distance(
+    point: tuple[float, float],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> float:
+    dx, dy = end[0] - start[0], end[1] - start[1]
+    denominator = dx * dx + dy * dy
+    if denominator <= SEGMENT_EPSILON:
+        return hypot(point[0] - start[0], point[1] - start[1])
+    projection = min(
+        1.0,
+        max(0.0, ((point[0] - start[0]) * dx + (point[1] - start[1]) * dy) / denominator),
+    )
+    closest = (start[0] + projection * dx, start[1] + projection * dy)
+    return hypot(point[0] - closest[0], point[1] - closest[1])
+
+
+def _arm_distance(
+    ball: BallObservation,
+    pose: PersonPoseObservation,
+) -> tuple[float, dict[str, Any]] | None:
+    if pose.status != "AVAILABLE" or pose.keypoints is None:
+        return None
+    x1, y1, x2, y2 = pose.frame_bbox
+    scale = max(hypot(x2 - x1, y2 - y1), 1e-6)
+    candidates: list[tuple[float, str, float, float]] = []
+    for side, elbow_index, wrist_index in (("left", 7, 9), ("right", 8, 10)):
+        elbow = pose.keypoints[elbow_index]
+        wrist = pose.keypoints[wrist_index]
+        if wrist[2] < POSE_KEYPOINT_CONFIDENCE:
+            continue
+        wrist_distance = hypot(ball.frame_pos[0] - wrist[0], ball.frame_pos[1] - wrist[1])
+        candidates.append((wrist_distance, f"{side}_wrist", wrist[2], elbow[2]))
+        if elbow[2] >= POSE_KEYPOINT_CONFIDENCE:
+            candidates.append(
+                (
+                    _point_segment_distance(
+                        ball.frame_pos,
+                        (elbow[0], elbow[1]),
+                        (wrist[0], wrist[1]),
+                    ),
+                    f"{side}_forearm",
+                    wrist[2],
+                    elbow[2],
+                )
+            )
+    if not candidates:
+        return None
+    distance, geometry, wrist_confidence, elbow_confidence = min(candidates)
+    return distance / scale, {
+        "geometry": geometry,
+        "raw_video_distance": distance,
+        "bbox_diagonal": scale,
+        "wrist_confidence": wrist_confidence,
+        "elbow_confidence": elbow_confidence,
+        "bbox_source": pose.bbox_source,
+    }
+
+
+def _pose_candidate(
+    *,
+    anchor_frame: int,
+    lower_frame: int,
+    upper_frame: int,
+    search_radius: int,
+    balls: dict[int, BallObservation],
+    players: dict[int, tuple[PlayerObservation, ...]],
+    poses: dict[int, tuple[PersonPoseObservation, ...]],
+    actions: dict[tuple[int, int], ActionObservation],
+) -> tuple[HitAssociation | None, dict[str, Any]]:
+    ball = _nearest_ball(
+        balls,
+        anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+        max_distance=search_radius,
+    )
+    if ball is None:
+        return None, {"pose_fallback_reason": "ball_missing_in_pose_window"}
+    ranked: list[tuple[float, float, PlayerObservation, int, dict[str, Any]]] = []
+    for frame_index in _nearby_frames(
+        anchor_frame,
+        lower_frame=lower_frame,
+        upper_frame=upper_frame,
+        radius=search_radius,
+    ):
+        player_by_track = {player.track_id: player for player in players.get(frame_index, ())}
+        for pose in poses.get(frame_index, ()):
+            player = player_by_track.get(pose.track_id)
+            if player is None:
+                continue
+            measured = _arm_distance(ball, pose)
+            if measured is None:
+                continue
+            spatial_distance, evidence = measured
+            temporal_offset = abs(frame_index - ball.frame_index)
+            action = actions.get((frame_index, player.source_track_id))
+            action_bonus = (
+                0.03
+                if action is not None and action.label.lower() in CONTACT_ACTION_PRIORITY
+                else 0.0
+            )
+            rank_score = spatial_distance + temporal_offset * POSE_TEMPORAL_PENALTY - action_bonus
+            ranked.append(
+                (
+                    rank_score,
+                    spatial_distance,
+                    player,
+                    frame_index,
+                    {
+                        **evidence,
+                        "track_id": player.track_id,
+                        "pose_frame_index": frame_index,
+                        "ball_frame_index": ball.frame_index,
+                        "temporal_offset": temporal_offset,
+                        "action_label": None if action is None else action.label,
+                        "action_bonus": action_bonus,
+                        "normalized_distance": spatial_distance,
+                        "rank_score": rank_score,
+                    },
+                )
+            )
+    if not ranked:
+        return None, {"pose_fallback_reason": "no_reliable_arm_keypoints"}
+    ranked.sort(key=lambda candidate: (candidate[0], candidate[2].track_id, candidate[3]))
+    best = ranked[0]
+    runner_up = next(
+        (candidate for candidate in ranked[1:] if candidate[2].track_id != best[2].track_id), None
+    )
+    margin = None if runner_up is None else runner_up[0] - best[0]
+    audit = {
+        "pose_recipe": "coco17-hand-forearm-association-v1",
+        "absolute_distance_gate": POSE_MAX_NORMALIZED_DISTANCE,
+        "runner_up_margin_gate": POSE_MIN_RUNNER_UP_MARGIN,
+        "best": best[4],
+        "runner_up": None if runner_up is None else runner_up[4],
+        "runner_up_margin": margin,
+    }
+    if best[1] > POSE_MAX_NORMALIZED_DISTANCE:
+        return None, {**audit, "pose_fallback_reason": "outside_distance_gate"}
+    if margin is not None and margin < POSE_MIN_RUNNER_UP_MARGIN:
+        return None, {**audit, "pose_fallback_reason": "ambiguous_runner_up"}
+    confidence = max(0.0, min(1.0, 1.0 - best[1] / POSE_MAX_NORMALIZED_DISTANCE))
+    return HitAssociation(ball, best[2], best[3], "pose_hand_nearest", confidence, audit), audit
 
 
 def _iou(
@@ -183,13 +341,30 @@ def associate_hit(
     balls: dict[int, BallObservation],
     players: dict[int, tuple[PlayerObservation, ...]],
     actions: dict[tuple[int, int], ActionObservation],
+    poses: dict[int, tuple[PersonPoseObservation, ...]] | None = None,
     frame_width: int,
     frame_height: int,
     action_search_radius: int,
 ) -> HitAssociation:
-    """Resolve the nearest contact action, then fall back to spatial ball IoU."""
+    """Resolve a hitter from reusable pose evidence, then degrade deterministically."""
     lower_frame = max(0, previous_anchor_frame + 1)
     upper_frame = max(lower_frame, next_anchor_frame - 1)
+    pose_audit: dict[str, Any]
+    if poses:
+        pose_match, pose_audit = _pose_candidate(
+            anchor_frame=anchor_frame,
+            lower_frame=lower_frame,
+            upper_frame=upper_frame,
+            search_radius=action_search_radius,
+            balls=balls,
+            players=players,
+            poses=poses,
+            actions=actions,
+        )
+        if pose_match is not None:
+            return pose_match
+    else:
+        pose_audit = {"pose_fallback_reason": "pose_evidence_unavailable"}
     action_match = _action_candidate(
         anchor_frame=anchor_frame,
         lower_frame=lower_frame,
@@ -202,9 +377,9 @@ def associate_hit(
         frame_height=frame_height,
     )
     if action_match is not None:
-        return action_match
+        return replace(action_match, evidence=pose_audit)
     if not balls:
-        return HitAssociation(None, None, None, "ball_missing", None)
+        return HitAssociation(None, None, None, "ball_missing", None, pose_audit)
     ball = _nearest_ball(
         balls,
         anchor_frame,
@@ -212,7 +387,14 @@ def associate_hit(
         upper_frame=upper_frame,
     )
     if ball is None:
-        return HitAssociation(None, None, None, "ball_missing_in_event_window", None)
+        return HitAssociation(
+            None,
+            None,
+            None,
+            "ball_missing_in_event_window",
+            None,
+            pose_audit,
+        )
     for frame_index in _nearby_frames(
         anchor_frame,
         lower_frame=lower_frame,
@@ -231,9 +413,9 @@ def associate_hit(
                 if frame_index == ball.frame_index
                 else ("nearby_player_frames_at_fixed_hit_ball")
             )
-            return HitAssociation(ball, player, frame_index, mode, score)
+            return HitAssociation(ball, player, frame_index, mode, score, pose_audit)
     mode = "terminal_ground_candidate" if is_terminal else "no_player"
-    return HitAssociation(ball, None, ball.frame_index, mode, None)
+    return HitAssociation(ball, None, ball.frame_index, mode, None, pose_audit)
 
 
 def classify_action(

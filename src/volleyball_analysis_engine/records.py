@@ -87,6 +87,15 @@ class ActionObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class GroupActivityObservation:
+    """Provider-owned scene activity retained as evidence but not interpreted."""
+
+    frame_index: int
+    label: str
+    confidence: float | None
+
+
+@dataclass(frozen=True, slots=True)
 class FrameObservation:
     """All projected observations at one canonical clip frame."""
 

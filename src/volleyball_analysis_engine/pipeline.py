@@ -101,7 +101,7 @@ class _AnalysisExecution:
 class AnalysisPipeline:
     """Produce one contract-valid AnalysisData artifact for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-pose-contact-0.8.0"
+    analysis_version = "volleyball-multitask-v2-contact-0.9.0"
 
     def __init__(
         self,
@@ -206,11 +206,26 @@ class AnalysisPipeline:
         unresolved = sum(
             event["association_state"] in {"ambiguous", "unresolved"} for event in events
         )
+        group_activity_by_frame = {
+            self._map_frame(source_frame, source_last_frame, destination_frames): {
+                "label": activity.label,
+                "confidence": activity.confidence,
+            }
+            for source_frame, activity in sorted(inferred.group_activities.items())
+        }
         extensions: dict[str, object] = {
             "inference_source": "canonical_clip",
-            "court_detection": "court-line-yolo26n-layout-v3+pose36-layout-tracker",
-            "tracking": "harmonic-mean-eiou+OSNet",
-            "action_source": "RT-DETRv4-X3D",
+            "court_detection": inferred.metadata.get("court_detector", "unknown"),
+            "tracking": inferred.metadata.get("tracker", "unknown"),
+            "action_source": inferred.metadata.get("action_source", "unknown"),
+            "group_activity": {
+                "status": "stored_not_interpreted",
+                "taxonomy": inferred.metadata.get("group_activity_taxonomy"),
+                "frames": [
+                    {"frame_index": frame_index, **value}
+                    for frame_index, value in sorted(group_activity_by_frame.items())
+                ],
+            },
             "provider_metadata": inferred.metadata,
             "contact_suggestions": contact_suggestions,
             "decoded_source_frame_count": source_last_frame + 1,
@@ -283,8 +298,8 @@ class AnalysisPipeline:
                 frame_width=inferred.frame_width,
                 frame_height=inferred.frame_height,
             ),
-            action_taxonomy_id="volleyball-analysis-engine.rtv4-x3d-actions",
-            action_taxonomy_version="1",
+            action_taxonomy_id="volleyball-inference-sdk.actions",
+            action_taxonomy_version="2.0",
         )
         evidence: AnalysisEvidenceArtifacts | None = None
         if include_evidence:
@@ -629,10 +644,10 @@ class AnalysisPipeline:
                 if action is not None:
                     actor["action"] = {
                         "label": action.label,
-                        "taxonomy_id": "volleyball-analysis-engine.rtv4-x3d-actions",
-                        "taxonomy_version": "1",
+                        "taxonomy_id": "volleyball-inference-sdk.actions",
+                        "taxonomy_version": "2.0",
                         "confidence": action.confidence,
-                        "attributes": {"source": "RT-DETRv4-X3D"},
+                        "attributes": {"source": "volleyball-multitask-v2"},
                     }
             event_extensions: dict[str, Any] = (
                 {

@@ -21,7 +21,6 @@ from volleyball_monitoring_ai import AIJobRequest
 
 from .ball_tracking import BallTrajectoryTracker
 from .court import CourtLineEstimator, interpolate_short_court_gaps
-from .nested_reid import NestedPartDescriptorExtractor
 from .person_pose import PersonPoseExtractor
 from .records import (
     ActionObservation,
@@ -29,14 +28,6 @@ from .records import (
     CourtFrame,
     PersonPoseObservation,
     PlayerObservation,
-    ReIdEmbeddingModel,
-    ReIdFeatureSnapshot,
-)
-from .reid_features import (
-    REID_MIN_BBOX_HEIGHT_PX,
-    REID_MIN_OBSERVATIONS,
-    ReIdFeatureAccumulator,
-    sports_osnet_embedding_model,
 )
 
 ProgressReporter = Callable[[float, str], None]
@@ -72,20 +63,6 @@ def normalize_frame_bbox(
     return left, top, right, bottom
 
 
-def _crop_detection(
-    frame: NDArray[np.uint8],
-    bbox: NDArray[np.float32],
-) -> NDArray[np.uint8] | None:
-    """Crop one real detector observation in source pixels for bounded ReID sampling."""
-    height, width = frame.shape[:2]
-    x1 = max(0, min(width - 1, int(np.floor(float(bbox[0])))))
-    y1 = max(0, min(height - 1, int(np.floor(float(bbox[1])))))
-    x2 = max(x1 + 1, min(width, int(np.ceil(float(bbox[2])))))
-    y2 = max(y1 + 1, min(height, int(np.ceil(float(bbox[3])))))
-    crop = frame[y1:y2, x1:x2]
-    return np.ascontiguousarray(crop) if crop.size else None
-
-
 def _empty_metadata() -> dict[str, Any]:
     return {}
 
@@ -106,7 +83,6 @@ class InferenceResult:
     frame_width: int
     frame_height: int
     fps: float
-    reid_feature_snapshot: ReIdFeatureSnapshot
     poses: dict[int, tuple[PersonPoseObservation, ...]] = field(default_factory=_empty_poses)
     metadata: dict[str, Any] = field(default_factory=_empty_metadata)
 
@@ -193,7 +169,6 @@ class HarmonicMeanTracker:
         # tracker maps cosine from [-1, 1] to [0, 1], so both values are transformed.
         appearance_recovery_threshold: float = 0.9572026133537292,
         appearance_recovery_margin: float = 0.01,
-        reid_min_observations: int = REID_MIN_OBSERVATIONS,
     ) -> None:
         self.max_lost_frames = max_lost_frames
         self.max_geometry_lost_frames = min(max_lost_frames, max_geometry_lost_frames)
@@ -204,42 +179,6 @@ class HarmonicMeanTracker:
         self._next_id = 1
         self._tracks: dict[int, _Track] = {}
         self._visible_track_ids: set[int] = set()
-        self._reid_features = ReIdFeatureAccumulator(
-            min_observations=reid_min_observations,
-        )
-
-    def _observe_reid_frame(
-        self,
-        *,
-        frame_index: int,
-        boxes: NDArray[np.float32],
-        scores: NDArray[np.float32],
-        embeddings: NDArray[np.float32] | None,
-        detection_track_ids: dict[int, int],
-        frame: NDArray[np.uint8] | None = None,
-    ) -> None:
-        """Aggregate sufficiently large real detections, never extrapolated boxes."""
-        eligible = {
-            detection_index: track_id
-            for detection_index, track_id in detection_track_ids.items()
-            if float(boxes[detection_index][3] - boxes[detection_index][1])
-            >= REID_MIN_BBOX_HEIGHT_PX
-        }
-        self._reid_features.observe_co_visibility(eligible.values())
-        if embeddings is None:
-            return
-        for detection_index, track_id in sorted(eligible.items()):
-            bbox_height = float(boxes[detection_index][3] - boxes[detection_index][1])
-            score = float(scores[detection_index])
-            crop = _crop_detection(frame, boxes[detection_index]) if frame is not None else None
-            self._reid_features.observe(
-                track_id=track_id,
-                frame_index=frame_index,
-                embedding=embeddings[detection_index],
-                quality=score,
-                selection_quality=score * bbox_height,
-                crop_bgr=crop,
-            )
 
     def _appearance_recovery_matches(
         self,
@@ -297,7 +236,6 @@ class HarmonicMeanTracker:
         boxes: NDArray[np.float32],
         scores: NDArray[np.float32],
         embeddings: NDArray[np.float32] | None,
-        frame: NDArray[np.uint8] | None = None,
     ) -> list[_TrackedDetection]:
         """Associate every current person detection without capping raw identities."""
         self._tracks = {
@@ -340,7 +278,6 @@ class HarmonicMeanTracker:
 
         previously_visible = self._visible_track_ids
         used_detections: set[int] = set()
-        detection_track_ids: dict[int, int] = {}
         output: list[_TrackedDetection] = []
         visible_track_ids: set[int] = set()
         for row, detection_index in matches:
@@ -361,7 +298,6 @@ class HarmonicMeanTracker:
             track.score = float(scores[detection_index])
             track.last_frame = frame_index
             used_detections.add(detection_index)
-            detection_track_ids[detection_index] = track.track_id
             visible_track_ids.add(track.track_id)
             output.append(
                 _TrackedDetection(
@@ -388,7 +324,6 @@ class HarmonicMeanTracker:
                 velocity=np.zeros(4, dtype=np.float32),
             )
             self._tracks[track.track_id] = track
-            detection_track_ids[detection_index] = track.track_id
             visible_track_ids.add(track.track_id)
             self._next_id += 1
             output.append(
@@ -399,14 +334,6 @@ class HarmonicMeanTracker:
                     track.score,
                 )
             )
-        self._observe_reid_frame(
-            frame_index=frame_index,
-            boxes=boxes,
-            scores=scores,
-            embeddings=embeddings,
-            detection_track_ids=detection_track_ids,
-            frame=frame,
-        )
         for track_id in previously_visible - visible_track_ids:
             track = self._tracks.get(track_id)
             if track is None:
@@ -425,17 +352,6 @@ class HarmonicMeanTracker:
             )
         self._visible_track_ids = visible_track_ids
         return output
-
-    def reid_feature_snapshot(
-        self,
-        embedding_model: ReIdEmbeddingModel,
-    ) -> ReIdFeatureSnapshot:
-        """Return the versioned compact feature state for this tracker run."""
-        return ReIdFeatureSnapshot(
-            schema_version="1.0.0",
-            embedding_model=embedding_model,
-            features=self._reid_features.snapshot(),
-        )
 
     def predict(self, frame_index: int) -> list[_TrackedDetection]:
         """Extrapolate active boxes between detector frames without changing identity state."""
@@ -548,7 +464,6 @@ class Rtv4X3DObservationProvider:
         court_max_hold_frames: int = 180,
         court_decoder: str = "auto",
         disable_amp: bool = False,
-        nested_reid: NestedPartDescriptorExtractor | None = None,
         person_pose: PersonPoseExtractor | None = None,
     ) -> None:
         paths.validate()
@@ -567,7 +482,6 @@ class Rtv4X3DObservationProvider:
         self.court_max_hold_frames = max(0, court_max_hold_frames)
         self.court_decoder = court_decoder
         self.disable_amp = disable_amp
-        self.nested_reid = nested_reid
         self.person_pose = person_pose
         self._torch: Any = None
         self._model: Any = None
@@ -577,10 +491,8 @@ class Rtv4X3DObservationProvider:
         self._use_amp = False
         self._osnet: Any = None
         self._roi_align: Any = None
-        self._detector_frame_tensor: Any = None
         self._osnet_mean: Any = None
         self._osnet_std: Any = None
-        self._reid_embedding_model: ReIdEmbeddingModel | None = None
         self._court_estimator: CourtLineEstimator | None = None
         self._effective_backend = backend
 
@@ -588,11 +500,6 @@ class Rtv4X3DObservationProvider:
     def effective_backend(self) -> str:
         """Return the actually loaded X3D backend after compatibility fallback."""
         return self._effective_backend
-
-    def _embedding_model_metadata(self) -> ReIdEmbeddingModel:
-        if self._reid_embedding_model is None:
-            self._reid_embedding_model = sports_osnet_embedding_model(self.paths.osnet_checkpoint)
-        return self._reid_embedding_model
 
     def infer(
         self,
@@ -609,7 +516,6 @@ class Rtv4X3DObservationProvider:
         # Every clip is an independent temporal sequence. A persistent worker or batch
         # offline runner reuses model weights, but must never reuse X3D frame history.
         self._streamer.clean_state()
-        self._detector_frame_tensor = None
         capture = cv2.VideoCapture(str(clip_path))
         if not capture.isOpened():
             raise ValueError(f"cannot open canonical clip: {clip_path}")
@@ -684,10 +590,6 @@ class Rtv4X3DObservationProvider:
             raise ValueError(
                 f"decoded frame count mismatch: job={expected_frames}, decoded={frame_index}"
             )
-        reid_snapshot = tracker.reid_feature_snapshot(self._embedding_model_metadata())
-        if self.nested_reid is not None:
-            report(0.70, "nested_part_descriptors")
-            reid_snapshot = self.nested_reid.enrich(reid_snapshot)
         return InferenceResult(
             players=players,
             courts=courts,
@@ -697,7 +599,6 @@ class Rtv4X3DObservationProvider:
             frame_width=width,
             frame_height=height,
             fps=fps,
-            reid_feature_snapshot=reid_snapshot,
             poses=poses,
             metadata={
                 "detector": "RT-DETRv4+X3D",
@@ -728,8 +629,6 @@ class Rtv4X3DObservationProvider:
     def prepare(self, report: ProgressReporter | None = None) -> None:
         """Load and strictly validate all model checkpoints without decoding a clip."""
         self._load_models(report or (lambda _progress, _stage: None))
-        if self.nested_reid is not None:
-            self.nested_reid.prepare()
         if self.person_pose is not None:
             self.person_pose.prepare()
 
@@ -795,7 +694,6 @@ class Rtv4X3DObservationProvider:
             device,
             checkpoint=str(self.paths.osnet_checkpoint),
         )
-        self._embedding_model_metadata()
         self._roi_align = importlib.import_module("torchvision.ops").roi_align
         self._osnet_mean = torch.tensor(
             [0.485, 0.456, 0.406], device=device, dtype=torch.float32
@@ -824,20 +722,29 @@ class Rtv4X3DObservationProvider:
         """Compile detector, ROIAlign and OSNet kernels outside job timing."""
         dummy = np.zeros((1080, 1920, 3), dtype=np.uint8)
         result = None
-        for _ in range(max(1, frame_num)):
-            result = self._infer_detector(dummy, 1920, 1080)
+        detector_frame_tensor = None
+        warmup_frames = max(1, frame_num)
+        for frame_index in range(warmup_frames):
+            LOGGER.info("detector warmup frame %d/%d", frame_index + 1, warmup_frames)
+            result, detector_frame_tensor = self._infer_detector(dummy, 1920, 1080)
+        LOGGER.info("detector warmup postprocess")
         self._to_numpy(result)
+        if detector_frame_tensor is None:
+            raise RuntimeError("detector warmup did not produce an input tensor")
+        LOGGER.info("detector warmup ROIAlign/OSNet")
         self._embeddings(
             dummy,
             np.asarray(
                 [[160.0, 160.0, 360.0, 720.0], [960.0, 180.0, 1180.0, 760.0]],
                 dtype=np.float32,
             ),
+            detector_frame_tensor,
         )
+        LOGGER.info("detector warmup synchronization")
         if self._device.type == "cuda":
             self._torch.cuda.synchronize(self._device)
         self._streamer.clean_state()
-        self._detector_frame_tensor = None
+        LOGGER.info("detector warmup completed")
 
     @staticmethod
     def _checkpoint_state(checkpoint: Any) -> Any:
@@ -893,7 +800,7 @@ class Rtv4X3DObservationProvider:
     ) -> _DetectorObservations:
         """Run the detector on one canonical source frame and normalize observations."""
         started = perf_counter()
-        result = self._infer_detector(frame, width, height)
+        result, detector_frame_tensor = self._infer_detector(frame, width, height)
         detector_seconds = perf_counter() - started
         started = perf_counter()
         labels, boxes, scores, action_labels, action_scores = self._to_numpy(result)
@@ -904,7 +811,7 @@ class Rtv4X3DObservationProvider:
         should_embed = frame_index % self.reid_every == 0
         if should_embed:
             started = perf_counter()
-            embeddings = self._embeddings(frame, person_boxes)
+            embeddings = self._embeddings(frame, person_boxes, detector_frame_tensor)
             embedding_seconds = perf_counter() - started
         else:
             embeddings = None
@@ -915,7 +822,6 @@ class Rtv4X3DObservationProvider:
             person_boxes,
             person_scores,
             embeddings,
-            frame,
         )
         tracking_seconds = perf_counter() - started
 
@@ -1024,7 +930,12 @@ class Rtv4X3DObservationProvider:
             pose_seconds=pose_seconds,
         )
 
-    def _infer_detector(self, frame: NDArray[np.uint8], width: int, height: int) -> Any:
+    def _infer_detector(
+        self,
+        frame: NDArray[np.uint8],
+        width: int,
+        height: int,
+    ) -> tuple[Any, Any]:
         torch = self._torch
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         input_height, input_width = self._input_size
@@ -1039,7 +950,6 @@ class Rtv4X3DObservationProvider:
             .to(device=self._device, dtype=dtype, non_blocking=True)
             .div_(255.0)
         )
-        self._detector_frame_tensor = tensor
         with (
             torch.inference_mode(),
             torch.autocast(
@@ -1050,7 +960,7 @@ class Rtv4X3DObservationProvider:
         ):
             features = self._streamer.forward_step(tensor)
             if features is None:
-                return None
+                return None, tensor
             encoded: Any = self._model.encoder(features)
             if isinstance(encoded, tuple):
                 encoded = cast("Any", encoded[0])
@@ -1060,7 +970,7 @@ class Rtv4X3DObservationProvider:
                 dtype=torch.float32,
                 device=self._device,
             )
-            return self._postprocessor(output, original_size)[0]
+            return self._postprocessor(output, original_size)[0], tensor
 
     @staticmethod
     def _to_numpy(
@@ -1102,6 +1012,7 @@ class Rtv4X3DObservationProvider:
         self,
         frame: NDArray[np.uint8],
         boxes: NDArray[np.float32],
+        detector_frame_tensor: Any,
     ) -> NDArray[np.float32]:
         if not len(boxes):
             return np.empty((0, 512), dtype=np.float32)
@@ -1125,7 +1036,7 @@ class Rtv4X3DObservationProvider:
             ),
         ):
             crops = self._roi_align(
-                self._detector_frame_tensor,
+                detector_frame_tensor,
                 roi_tensor,
                 output_size=(256, 128),
                 spatial_scale=1.0,

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import defaultdict
 from dataclasses import dataclass
 from itertools import pairwise
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -37,8 +38,25 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _javascript_json_numbers(value: object) -> object:
+    """Match JSON.stringify for the finite integral floats used by wire artifacts."""
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("ReID JSON artifacts cannot contain non-finite numbers")
+        if value == 0.0 or (value.is_integer() and abs(value) <= 9_007_199_254_740_991):
+            return int(value)
+        return value
+    if isinstance(value, list):
+        return [_javascript_json_numbers(item) for item in cast("list[object]", value)]
+    if isinstance(value, dict):
+        items = cast("dict[str, object]", value)
+        return {key: _javascript_json_numbers(item) for key, item in items.items()}
+    return value
+
+
 def _semantic_hash(payload: dict[str, Any]) -> str:
-    return hashlib.sha256(_json_bytes(payload)).hexdigest()
+    normalized = cast("dict[str, Any]", _javascript_json_numbers(payload))
+    return hashlib.sha256(_json_bytes(normalized)).hexdigest()
 
 
 def _validate_semantic_hash(payload: dict[str, Any], *, label: str) -> None:

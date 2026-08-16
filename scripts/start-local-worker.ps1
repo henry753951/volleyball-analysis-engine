@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
     [string]$CentralHttpUrl = "http://localhost:10000",
-    [string]$CentralWsUrl = "ws://localhost:10000/api/v1/ai/providers/ws",
-    [string]$InstanceKey = "analysis-worker-rtx5070-reid-court-v3",
-    [string]$TokenName = "local-rtx5070-reid-court-v3",
+    [string]$CentralWsUrl = "ws://localhost:10000/api/v2/ai/providers/ws",
+    [string]$InstanceKey = "analysis-worker-rtx5070-provider-v2",
+    [string]$TokenName = "local-rtx5070-provider-v2",
     [int]$ReIdEvery = 1,
     [string]$CourtModel = "v3",
     [int]$CourtImageSize = 512,
-    [int]$Concurrency = 1
+    [ValidateRange(1, 64)]
+    [int]$Concurrency = 1,
+    [switch]$EnableReidVlm
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,6 +41,10 @@ $env:VOLLYAI_COURT_MODEL = $CourtModel
 $env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
 $env:VOLLYAI_COURT_BATCH_SIZE = "16"
 $env:VOLLYAI_COURT_DECODER = "auto"
+$env:VOLLYAI_REID_FEATURE_ENABLED = "true"
+$env:VOLLYAI_REID_ASSOCIATION_ENABLED = "true"
+$env:VOLLYAI_IDENTITY_PREVIEW_ENABLED = "true"
+$env:VOLLYAI_REID_VLM_ENABLED = if ($EnableReidVlm) { "true" } else { "false" }
 $env:VOLLYAI_WORKSPACE = Join-Path $projectRoot ".artifacts\workspaces"
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -46,6 +52,7 @@ $stdout = Join-Path $projectRoot ".artifacts\online-worker-$stamp.stdout.log"
 $stderr = Join-Path $projectRoot ".artifacts\online-worker-$stamp.stderr.log"
 $process = Start-Process `
     -FilePath $workerExecutable `
+    -ArgumentList $(if ($EnableReidVlm) { "--enable-reid-vlm" } else { "--disable-reid-vlm" }) `
     -WorkingDirectory $projectRoot `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdout `

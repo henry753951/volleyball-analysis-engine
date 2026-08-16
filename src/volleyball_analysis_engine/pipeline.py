@@ -35,13 +35,32 @@ from .records import (
     PersonPoseObservation,
     PlayerObservation,
 )
-from .reid_features import build_reid_feature_bank, resolve_track_court_sides
 
 ProgressReporter = Callable[[float, str], None]
 
 
 def _noop_progress(_progress: float, _stage: str) -> None:
     """Accept progress updates when no reporter was supplied."""
+
+
+def _resolve_track_court_sides(frames: list[FrameObservation]) -> dict[int, str]:
+    """Resolve a run-local track's stable court side without roster assumptions."""
+    counts: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for frame in frames:
+        for player in frame.players:
+            counts[player.track_id][player.court_side] += 1
+    resolved: dict[int, str] = {}
+    for track_id, side_counts in counts.items():
+        left_count = side_counts["left"]
+        right_count = side_counts["right"]
+        resolved[track_id] = (
+            "unknown"
+            if left_count == right_count
+            else "left"
+            if left_count > right_count
+            else "right"
+        )
+    return resolved
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +101,7 @@ class _AnalysisExecution:
 class AnalysisPipeline:
     """Produce one contract-valid AnalysisData artifact for an incoming job."""
 
-    analysis_version = "rtv4-x3d-court-nested-reid-contact-0.7.0"
+    analysis_version = "rtv4-x3d-court-pose-contact-0.8.0"
 
     def __init__(
         self,
@@ -106,7 +125,7 @@ class AnalysisPipeline:
         report: ProgressReporter | None = None,
         artifact_dir: Path | None = None,
     ) -> AnalysisDataBundle:
-        """Run the legacy-compatible AnalysisData-only entrypoint."""
+        """Run the offline AnalysisData-only entrypoint without identity matching."""
         return self._analyze(
             job,
             clip_path,
@@ -166,19 +185,6 @@ class AnalysisPipeline:
         actions = self._map_actions(inferred.actions, source_last_frame, destination_frames)
         poses = self._map_poses(inferred.poses, source_last_frame, destination_frames)
 
-        reid_feature_bank: dict[str, object] | None = None
-        if not include_evidence:
-            reporter(0.76, "legacy_reid_feature_bank")
-            reid_feature_bank = build_reid_feature_bank(
-                inferred.reid_feature_snapshot,
-                frames,
-                map_frame=lambda frame_index: self._map_frame(
-                    frame_index,
-                    source_last_frame,
-                    destination_frames,
-                ),
-                descriptor_recipe=inferred.reid_feature_snapshot.descriptor_recipe or {},
-            )
         players_by_frame = {frame.frame_index: frame.players for frame in frames}
 
         reporter(0.82, "hit_association")
@@ -209,16 +215,8 @@ class AnalysisPipeline:
             "contact_suggestions": contact_suggestions,
             "decoded_source_frame_count": source_last_frame + 1,
             "canonical_frame_count": destination_frames,
+            "provider_work_boundary": "base-analysis-without-identity",
         }
-        if include_evidence:
-            extensions["provider_work_boundary"] = "base-analysis-without-identity"
-        elif reid_feature_bank is not None:
-            extensions.update(
-                {
-                    "reid": "nested-part-adaptation-fixed-roster-v2",
-                    "fixed_roster_reid": reid_feature_bank,
-                }
-            )
         domain = AnalysisDomainData.model_validate(
             {
                 "schema_version": "1.0.0",
@@ -779,7 +777,7 @@ class AnalysisPipeline:
 
     @staticmethod
     def _build_tracks(frames: list[FrameObservation]) -> list[dict[str, Any]]:
-        court_sides = resolve_track_court_sides(frames)
+        court_sides = _resolve_track_court_sides(frames)
         observations: dict[int, list[PlayerObservation]] = defaultdict(list)
         for frame in frames:
             for player in frame.players:
@@ -802,8 +800,7 @@ class AnalysisPipeline:
                         else sum(confidence_values) / len(confidence_values)
                     ),
                     "metadata": {
-                        "reid_basis": "run_local_tracker_id",
-                        "fixed_roster_reid": "2.0.0",
+                        "identity_basis": "run_local_tracker_id",
                         "source_track_ids": sorted({player.source_track_id for player in players}),
                     },
                 }

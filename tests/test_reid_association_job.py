@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
+import math
+from typing import Any, cast
 from uuid import uuid4
 
 import numpy as np
@@ -20,8 +21,26 @@ def _json_bytes(payload: dict[str, Any]) -> bytes:
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _javascript_json_numbers(value: object) -> object:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            message = "non-finite test fixture number"
+            raise ValueError(message)
+        if value == 0.0 or (value.is_integer() and abs(value) <= 9_007_199_254_740_991):
+            return int(value)
+        return value
+    if isinstance(value, list):
+        return [_javascript_json_numbers(item) for item in cast("list[object]", value)]
+    if isinstance(value, dict):
+        items = cast("dict[str, object]", value)
+        return {key: _javascript_json_numbers(item) for key, item in items.items()}
+    return value
+
+
 def _semantic(payload: dict[str, Any]) -> dict[str, Any]:
-    return {**payload, "content_sha256": hashlib.sha256(_json_bytes(payload)).hexdigest()}
+    normalized = cast("dict[str, Any]", _javascript_json_numbers(payload))
+    digest = hashlib.sha256(_json_bytes(normalized)).hexdigest()
+    return {**payload, "content_sha256": digest}
 
 
 def _normalized(dimension: int, index: int = 0) -> bytes:
@@ -239,3 +258,10 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
         "DINO",
         "JERSEY_VLM",
     }
+    artifact_data = output.artifacts[0].data
+    assert isinstance(artifact_data, bytes)
+    serialized = json.loads(artifact_data)
+    claimed = serialized.pop("content_sha256")
+    normalized_serialized = cast("dict[str, Any]", _javascript_json_numbers(serialized))
+    calculated = hashlib.sha256(_json_bytes(normalized_serialized)).hexdigest()
+    assert claimed == calculated

@@ -22,9 +22,8 @@ from volleyball_monitoring_ai.provider_work import ProviderWorkKind
 
 from .config import Settings
 from .identity_preview_job import IdentityPreviewInputs, build_identity_preview_artifacts
-from .inference import ModelPaths, Rtv4X3DObservationProvider
+from .multitask_provider import VolleyballMultitaskObservationProvider
 from .nested_reid import NestedPartDescriptorExtractor, NestedReidPaths
-from .person_pose import PersonPoseExtractor
 from .pipeline import AnalysisPipeline, PipelineConfig
 from .reid_association_job import (
     ReidAssociationInputs,
@@ -528,41 +527,19 @@ async def run_worker(settings: Settings) -> None:
 
 def build_pipeline(settings: Settings) -> AnalysisPipeline:
     """Build the single model pipeline shared by online and offline entrypoints."""
-    person_pose = (
-        PersonPoseExtractor(
-            settings.pose_checkpoint,
-            device=settings.device,
-            batch_size=settings.person_pose_batch_size,
-            imgsz=settings.person_pose_imgsz,
-            confidence=settings.person_pose_confidence,
-            keypoint_confidence=settings.person_pose_keypoint_confidence,
-            minimum_keypoints=settings.person_pose_minimum_keypoints,
-        )
-        if settings.person_pose_enabled
-        else None
-    )
-    provider = Rtv4X3DObservationProvider(
-        ModelPaths(
-            rtv4_root=settings.rtv4_root,
-            rtv4_config=settings.rtv4_config,
-            rtv4_checkpoint=settings.rtv4_checkpoint,
-            smp_root=settings.smp_root,
-            osnet_checkpoint=settings.osnet_checkpoint,
-        ),
+    provider = VolleyballMultitaskObservationProvider(
+        sdk_root=settings.multitask_sdk_root,
+        checkpoint=settings.multitask_checkpoint,
+        config=settings.multitask_config,
+        smp_root=settings.smp_root,
+        osnet_checkpoint=settings.osnet_checkpoint,
         device=settings.device,
-        backend=settings.rtv4_backend,
         detector_threshold=settings.detector_threshold,
-        detector_input_scale=settings.detector_input_scale,
+        batch_size=settings.multitask_batch_size,
         reid_every=settings.reid_every,
-        court_model=settings.court_model,
-        court_imgsz=settings.court_imgsz,
-        court_batch_size=settings.court_batch_size,
-        court_layout_every=settings.court_layout_every,
-        court_refresh_every=settings.court_refresh_every,
-        court_track_every=settings.court_track_every,
-        court_max_hold_frames=settings.court_max_hold_frames,
-        court_decoder=settings.court_decoder,
-        disable_amp=settings.disable_amp,
-        person_pose=person_pose,
+        fp16=settings.multitask_fp16,
+        warmup=settings.multitask_warmup,
+        pose_keypoint_confidence=settings.person_pose_keypoint_confidence,
+        pose_minimum_keypoints=settings.person_pose_minimum_keypoints,
     )
     return AnalysisPipeline(provider, PipelineConfig())

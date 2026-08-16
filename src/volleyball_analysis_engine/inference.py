@@ -26,6 +26,7 @@ from .records import (
     ActionObservation,
     BallObservation,
     CourtFrame,
+    GroupActivityObservation,
     PersonPoseObservation,
     PlayerObservation,
 )
@@ -71,6 +72,10 @@ def _empty_poses() -> dict[int, tuple[PersonPoseObservation, ...]]:
     return {}
 
 
+def _empty_group_activities() -> dict[int, GroupActivityObservation]:
+    return {}
+
+
 @dataclass(frozen=True, slots=True)
 class InferenceResult:
     """All model-owned observations for one canonical clip."""
@@ -84,6 +89,9 @@ class InferenceResult:
     frame_height: int
     fps: float
     poses: dict[int, tuple[PersonPoseObservation, ...]] = field(default_factory=_empty_poses)
+    group_activities: dict[int, GroupActivityObservation] = field(
+        default_factory=_empty_group_activities
+    )
     metadata: dict[str, Any] = field(default_factory=_empty_metadata)
 
 

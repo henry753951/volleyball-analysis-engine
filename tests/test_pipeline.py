@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -16,6 +17,7 @@ from volleyball_analysis_engine.records import (
     BallObservation,
     CourtFrame,
     CourtKeypoint,
+    GroupActivityObservation,
     PlayerObservation,
 )
 
@@ -281,6 +283,37 @@ def test_provider_work_base_analysis_does_not_build_or_publish_reid_bank(
     assert "reid" not in result.bundle.domain.extensions
     assert "fixed_roster_reid" not in result.bundle.domain.extensions
     assert result.evidence.manifest.analysis_run_id == result.bundle.domain.analysis_id
+
+
+def test_pipeline_stores_group_activity_without_interpreting_it(tmp_path: Path) -> None:
+    class GroupProvider(FakeProvider):
+        def infer(
+            self,
+            clip_path: Path,
+            job: AIJobRequest,
+            report: Callable[[float, str], None],
+        ) -> InferenceResult:
+            base = super().infer(clip_path, job, report)
+            return replace(
+                base,
+                group_activities={
+                    0: GroupActivityObservation(0, "r_pass", 0.91),
+                    2: GroupActivityObservation(2, "l_spike", 0.87),
+                },
+            )
+
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"unit-test")
+    bundle = AnalysisPipeline(GroupProvider()).analyze(job(), clip)
+
+    assert bundle.domain.extensions["group_activity"] == {
+        "status": "stored_not_interpreted",
+        "taxonomy": None,
+        "frames": [
+            {"frame_index": 0, "label": "r_pass", "confidence": 0.91},
+            {"frame_index": 2, "label": "l_spike", "confidence": 0.87},
+        ],
+    }
 
 
 def test_pipeline_does_not_generate_contact_proposals_over_manual_markers(

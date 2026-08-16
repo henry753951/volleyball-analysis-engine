@@ -5,10 +5,10 @@ Headless `uv` project for running the external AI side of
 
 ```text
 canonical clip
-→ RT-DETRv4 + streaming X3D person/ball/action inference
+→ Volleyball inference SDK v2 temporal multitask inference on every target frame
+  (person/ball/action + Court60 + COCO-17 pose + group activity in one pass)
 → OSNet appearance embeddings
 → harmonic-mean EIoU tracking with a retained lost pool
-→ volley-court-lines dense line inference + stable 36-point layout tracking
 → sparse clip-local OSNet prototypes + co-visibility cannot-links (run-local IDs stay unchanged)
 → ball-trajectory contact proposal detection between explicit segment START/END boundaries
 → contact-to-player association
@@ -42,8 +42,8 @@ H:\Repos\
 └── volley-ai\
 ```
 
-Model files and the supplied RT-DETRv4 source are prepared under ignored `.artifacts/`; weights are
-never committed.
+The inference SDK and checkpoint remain external trusted assets and are selected with
+`VOLLYAI_MULTITASK_SDK_ROOT` and `VOLLYAI_MULTITASK_CHECKPOINT`; weights are never committed.
 
 ### Optional ReID VLM
 
@@ -68,17 +68,16 @@ The defaults point at the assets supplied for this project:
 .\scripts\setup-dev.ps1
 ```
 
-This extracts `E:\User\Downloads\volleyball_ball_action.zip`, copies `best_stg1.pth`, installs
-CUDA 13.0 PyTorch and model dependencies with `uv`, downloads the checksum-verified
-`volley-court-lines` v3 layout model on first use, then runs the environment doctor and strictly
-loads both model stacks. Set `VOLLYAI_COURT_MODEL=v2` to use the retained rollback model without
-changing engine code. Use `-TorchBackend cpu` for CPU-only setup or `-RefreshAssets` to replace an
-earlier extraction.
+This validates `E:\User\Downloads\volleyball_inference_sdk` and its `best.pth`, installs CUDA 13.0
+PyTorch and model dependencies with `uv`, then strictly loads and warms the multitask model plus
+the retained OSNet tracking encoder. Use `-MultitaskSdkRoot` for another asset location or
+`-TorchBackend cpu` for CPU-only setup.
 
-The default X3D temporal backend is the exact rolling-window implementation supplied with the
-model. `continual-inference` 1.2.4 cannot convert PyTorchVideo's `ResNetBasicStem`; selecting
-`VOLLYAI_RTV4_BACKEND=continual` therefore attempts conversion and records an explicit fallback
-to `rolling` instead of silently changing inference semantics.
+The SDK samples five-frame centered clips with its configured temporal spacing and emits one result
+for every target frame. Court60 uses ten semantic anchors plus fifty deterministic edge samples;
+all sixty points map to the existing 18 x 9 metre court. COCO-17 visibility is preserved as pose
+confidence. Group activity is written to `AnalysisData.extensions.group_activity` with its provider
+taxonomy, but no server or UI behavior interprets it yet.
 
 Strictly load all checkpoints and inspect a clip:
 
@@ -105,9 +104,11 @@ For a latency benchmark that omits developer-only image/video rendering while pr
 typed result and VOV1 overlay, add `-Prewarm -NoDebugArtifacts`. The generated `benchmark.json`
 separates model warmup from job wall time and reports effective FPS and real-time factor.
 
-### Local RTX 5070 benchmark
+### Historical pre-v2 benchmark
 
-The checked-in quality profile performs fresh player, ball, action, ReID, and court-line model
+The following numbers describe the removed separate-model pipeline and are retained only as a
+comparison baseline. The current multitask-v2 path must be benchmarked separately before release.
+The old quality profile performed fresh player, ball, action, ReID, and court-line model
 inference on every source frame. The v3 model returns a direct 36-point layout for every frame;
 the engine consumes that layout once and never sends it through the legacy layout matcher again.
 Only `ok` layouts containing all 36 keypoints enter temporal tracking. Ambiguous or abstained
@@ -123,7 +124,7 @@ Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds
 | Every model on every source frame | 73.654 s | 12.00 | 0.201x |
 | Every model + 1920x1080 preview package | 103.455 s | 8.54 | 0.143x |
 
-RT-DETRv4/X3D detector cadence is fixed at every source frame and is intentionally not configurable.
+The historical RT-DETRv4/X3D detector cadence was fixed at every source frame.
 The tracker may bridge an isolated detector miss for at most two frames using measured velocity,
 but its longer ReID recovery pool is never rendered. This prevents stale identities from flashing
 back into the overlay while retaining short-gap continuity. The rendered H.264 stream was checked
@@ -155,7 +156,7 @@ outputs/sample/
 
 The preview artifacts retain the Contract Lab `sdk-analysis-visual-v5` layout for direct visual
 comparison, but use production-oriented names. Their contents come from the current
-RT-DETRv4/X3D, tracking, court and ReID run.
+multitask-v2, tracking and ReID run.
 `overlay-preview.mp4` uses the same 1920x1080 layout: a 1280x720 match
 view, 640x720 event panel and 1920x360 canonical-court panel. FFmpeg encodes H.264/yuv420p,
 preserves available AAC audio and writes `+faststart` metadata.
@@ -197,9 +198,8 @@ typed result through the authenticated callback.
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.
-RT-DETR, court inference, and court identity matching run on every source frame. Velocity-aware
-tracking only bridges an isolated detector miss; a prior court layout only constrains the
-current-frame match and never replaces it.
+The temporal multitask model produces detector, action, court, pose and group evidence for every
+target frame. Velocity-aware tracking only bridges an isolated detector miss.
 
 For the local Docker Compose central server, create a managed Worker Token and start the worker in
 one command. The token is passed only through the child-process environment and is not written to
@@ -217,7 +217,6 @@ uv run pyright
 uv run pytest
 ```
 
-The model source and checkpoints are trusted local assets supplied by the project owner. The engine
-loads the RT-DETRv4 checkpoint with an exact `strict=True` state-dict match against
-`rtv4_x3d_volleyball_v4a_decoupled.yml`. The supplied checkpoint is the 5-frame model
-(`120/240/480` encoder channels); the similarly named 7-frame config is intentionally rejected.
+The model source and checkpoint are trusted local assets supplied by the project owner. The engine
+requires Volleyball inference schema `2.0`; the SDK loader enforces at least 98 percent compatible
+checkpoint tensor coverage before the worker can advertise readiness.

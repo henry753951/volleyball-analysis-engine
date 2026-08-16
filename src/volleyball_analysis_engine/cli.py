@@ -22,7 +22,7 @@ from volleyball_monitoring_ai import (
 )
 
 from .config import Settings
-from .inference import Rtv4X3DObservationProvider
+from .multitask_provider import VolleyballMultitaskObservationProvider
 from .worker import build_pipeline, run_worker
 
 
@@ -153,10 +153,9 @@ async def _run_offline(settings: Settings, arguments: argparse.Namespace) -> Non
 def _doctor(settings: Settings, clip: Path | None, *, load_models: bool) -> None:
     pipeline = build_pipeline(settings)
     provider = pipeline.provider
-    if not isinstance(provider, Rtv4X3DObservationProvider):
-        raise TypeError("doctor requires the RTv4 observation provider")
-    paths = provider.paths
-    paths.validate()
+    if not isinstance(provider, VolleyballMultitaskObservationProvider):
+        raise TypeError("doctor requires the Volleyball multitask observation provider")
+    provider.validate_assets()
     report: dict[str, Any] = {
         "assets": "ok",
         "ffmpeg": shutil.which("ffmpeg"),

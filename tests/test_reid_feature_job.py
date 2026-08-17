@@ -26,7 +26,6 @@ from volleyball_analysis_engine.evidence_artifacts import build_analysis_evidenc
 from volleyball_analysis_engine.records import PersonPoseObservation
 from volleyball_analysis_engine.reid_feature_job import (
     ReidFeatureInputs,
-    SelectedCrop,
     build_reid_feature_artifacts,
 )
 from volleyball_analysis_engine.worker import provider_work_capabilities
@@ -154,34 +153,6 @@ class FakeOsnet:
         assert batch_size > 0
         values = np.ones((len(crops), 512), dtype=np.float32)
         return values / np.linalg.norm(values, axis=1, keepdims=True)
-
-
-class FakeVlm:
-    """Candidate-constrained VLM replacement preserving exact response text."""
-
-    model_namespace = "jersey-vlm/qwen-v1"
-
-    def identify(
-        self,
-        *,
-        crops: list[SelectedCrop],
-        candidates: list[tuple[str, int, str | None]],
-    ) -> tuple[str, str]:
-        """Select only the first supplied immutable roster candidate."""
-        assert crops
-        entry_id, number, _ = candidates[0]
-        prompt = f"allowed={entry_id}:{number}"
-        raw = json.dumps(
-            {
-                "roster_entry_id": entry_id,
-                "jersey_number": number,
-                "decision": "candidate",
-                "confidence": "high",
-                "alternatives": [],
-            },
-            separators=(",", ":"),
-        )
-        return prompt, raw
 
 
 def test_feature_job_reuses_saved_pose_and_emits_traceable_multimodal_evidence(
@@ -327,7 +298,7 @@ def test_feature_job_reuses_saved_pose_and_emits_traceable_multimodal_evidence(
     )
     request = ReidFeatureJobRequest.model_validate(
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "provider_job_id": str(uuid4()),
             "evidence_set_id": evidence_set_id,
             "analysis_run_id": analysis_run_id,
@@ -343,7 +314,6 @@ def test_feature_job_reuses_saved_pose_and_emits_traceable_multimodal_evidence(
                     "modality": "KPR_PROMPT",
                     "model_namespace": "kpr/coco17-prompt/v1",
                 },
-                {"modality": "JERSEY_VLM", "model_namespace": "jersey-vlm/qwen-v1"},
             ],
         }
     )
@@ -360,7 +330,6 @@ def test_feature_job_reuses_saved_pose_and_emits_traceable_multimodal_evidence(
         ),
         nested=FakeNestedWithoutPose(),  # type: ignore[arg-type]
         osnet=FakeOsnet(),  # type: ignore[arg-type]
-        vlm=FakeVlm(),
         candidate_count=4,
         top_k=2,
         min_gap=1,
@@ -373,34 +342,14 @@ def test_feature_job_reuses_saved_pose_and_emits_traceable_multimodal_evidence(
         for tracklet in result.result.tracklets
     )
     assert all(len(tracklet.cannot_link_tracklet_ids) == 1 for tracklet in result.result.tracklets)
-    jerseys = []
-    for tracklet in result.result.tracklets:
-        assert tracklet.jersey_vlm is not None
-        jerseys.append(tracklet.jersey_vlm.candidate_numbers)
-    assert jerseys == [[11], [2]]
-    raw_artifact = next(
-        artifact for artifact in result.artifacts if artifact.kind == "JERSEY_VLM_RESPONSE"
-    )
-    raw_bundle = json.loads(raw_artifact.read_bytes())
-    assert len(raw_bundle["responses"]) == 2
-    assert all(response["raw_response"] for response in raw_bundle["responses"])
 
 
 def test_reid_feature_capability_is_only_advertised_after_explicit_enablement() -> None:
     disabled = provider_work_capabilities(Settings())
     enabled = provider_work_capabilities(Settings(reid_feature_enabled=True))
-    enabled_with_vlm = provider_work_capabilities(
-        Settings(reid_feature_enabled=True, reid_vlm_enabled=True)
-    )
 
     assert [item.work_kind for item in disabled.work_capabilities] == ["ANALYSIS"]
     assert [item.work_kind for item in enabled.work_capabilities] == [
         "ANALYSIS",
         "REID_FEATURE_EXTRACTION",
     ]
-    feature = enabled.work_capabilities[-1]
-    assert "JERSEY_VLM_RESPONSE" not in feature.produced_artifact_kinds
-    assert "jersey-vlm/qwen-v1" not in feature.model_recipe_namespaces
-    feature_with_vlm = enabled_with_vlm.work_capabilities[-1]
-    assert "JERSEY_VLM_RESPONSE" in feature_with_vlm.produced_artifact_kinds
-    assert "jersey-vlm/qwen-v1" in feature_with_vlm.model_recipe_namespaces

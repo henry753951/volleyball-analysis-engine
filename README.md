@@ -8,8 +8,9 @@ canonical clip
 → Volleyball inference SDK v2 temporal multitask inference on every target frame
   (person/ball/action + Court60 + COCO-17 pose + group activity in one pass)
 → OSNet appearance embeddings
-→ harmonic-mean EIoU tracking with a retained lost pool
-→ sparse clip-local OSNet prototypes + co-visibility cannot-links (run-local IDs stay unchanged)
+→ upstream DeepEIOU run-local tracking
+→ selective SAM3 correction only for low-margin/gap ambiguity windows
+→ versioned ReID evidence jobs with co-visibility cannot-links (separate from Local IDs)
 → ball-trajectory contact proposal detection between explicit segment START/END boundaries
 → contact-to-player association
 → AnalysisResult 1.1 JSON + VOV1 overlay + developer artifacts
@@ -45,20 +46,18 @@ H:\Repos\
 The inference SDK and checkpoint remain external trusted assets and are selected with
 `VOLLYAI_MULTITASK_SDK_ROOT` and `VOLLYAI_MULTITASK_CHECKPOINT`; weights are never committed.
 
-### Optional ReID VLM
+### Local ID tracking and selective SAM3
 
-The jersey-number VLM is opt-in. Leave `VOLLYAI_REID_VLM_ENABLED=false` to avoid loading the
-model and to omit its artifact kind and model recipe from Worker capability registration. The
-worker command can override the environment for one process:
+`VOLLYAI_LOCAL_TRACKER=deep_eiou` uses the reference DeepEIOU implementation from
+`VOLLYAI_SMP_ROOT` and computes OSNet for every person detection. `VOLLYAI_LOCAL_SAM3_ENABLED=true`
+adds out-of-process SAM3 correction only when the upstream margin/gap detector opens an ambiguity
+window. The bridge uses `VOLLYAI_LOCAL_SAM3_PYTHON`, so its SAM3/PyTorch environment stays isolated
+from the multitask worker environment. A missing runtime, timeout, decode mismatch, or invalid
+co-visible rename keeps the complete DeepEIOU output and records the fallback in result metadata.
 
-```powershell
-volleyball-analysis worker --disable-reid-vlm
-volleyball-analysis-worker --enable-reid-vlm
-```
-
-The VLM is effective only when `VOLLYAI_REID_FEATURE_ENABLED=true`; analysis and saved every-frame
-pose evidence remain independent of it. `scripts/start-local-worker.ps1` and
-`scripts/run-online-worker.ps1` keep VLM disabled unless `-EnableReidVlm` is passed explicitly.
+The local launcher enables this path by default. Use `-DisableLocalSam3` or
+`volleyball-analysis-worker --disable-local-sam3` to keep DeepEIOU without SAM3. Docker Compose keeps
+SAM3 off until the separate runtime and weights are intentionally packaged or mounted.
 
 ## First-time setup on this machine
 
@@ -103,38 +102,6 @@ optional standalone key-point JSON list can replace `job.key_points` for manual 
 For a latency benchmark that omits developer-only image/video rendering while preserving the full
 typed result and VOV1 overlay, add `-Prewarm -NoDebugArtifacts`. The generated `benchmark.json`
 separates model warmup from job wall time and reports effective FPS and real-time factor.
-
-### Historical pre-v2 benchmark
-
-The following numbers describe the removed separate-model pipeline and are retained only as a
-comparison baseline. The current multitask-v2 path must be benchmarked separately before release.
-The old quality profile performed fresh player, ball, action, ReID, and court-line model
-inference on every source frame. The v3 model returns a direct 36-point layout for every frame;
-the engine consumes that layout once and never sends it through the legacy layout matcher again.
-Only `ok` layouts containing all 36 keypoints enter temporal tracking. Ambiguous or abstained
-frames never become accepted output and are not replaced by stale geometry.
-Model warmup is intentionally outside job wall time because the online worker completes it before
-registering. Developer preview rendering is disabled online by default; its final H.264/AAC web
-encode uses NVENC when available and falls back to libx264.
-
-Measured on 2026-08-12 with the 884-frame, 59.737 FPS `clip.mp4` (14.798 seconds):
-
-| Path | Job wall time | Effective FPS | Real-time factor |
-| --- | ---: | ---: | ---: |
-| Every model on every source frame | 73.654 s | 12.00 | 0.201x |
-| Every model + 1920x1080 preview package | 103.455 s | 8.54 | 0.143x |
-
-The historical RT-DETRv4/X3D detector cadence was fixed at every source frame.
-The tracker may bridge an isolated detector miss for at most two frames using measured velocity,
-but its longer ReID recovery pool is never rendered. This prevents stale identities from flashing
-back into the overlay while retaining short-gap continuity. The rendered H.264 stream was checked
-to contain all 884 source frames; audio ending a few milliseconds earlier does not truncate the
-video stream.
-
-Court layout recovery keeps a clip-level Pose36 orientation transform. If a later direct proposal
-returns the same geometry with a left/right, near/far, or 180-degree symmetric identity, keypoint
-IDs and the output homography are mapped back to the established orientation. Raw model/tracker
-geometry stays unchanged, so the lock does not reduce per-frame tracking continuity.
 
 Output:
 
@@ -195,6 +162,10 @@ use port `4000` when the central server itself runs directly on the host.
 The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
+
+The current portable installation path uses `uv`; it includes model download/verification, token
+configuration, Windows launch scripts, and Linux commands in
+[docs/UV_WORKER_INSTALL.md](docs/UV_WORKER_INSTALL.md).
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.

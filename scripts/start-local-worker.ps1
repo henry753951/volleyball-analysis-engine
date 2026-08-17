@@ -5,11 +5,9 @@ param(
     [string]$InstanceKey = "analysis-worker-rtx5070-provider-v2",
     [string]$TokenName = "local-rtx5070-provider-v2",
     [int]$ReIdEvery = 1,
-    [string]$CourtModel = "v3",
-    [int]$CourtImageSize = 512,
     [ValidateRange(1, 64)]
     [int]$Concurrency = 1,
-    [switch]$EnableReidVlm
+    [switch]$DisableLocalSam3
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,14 +35,13 @@ $env:VOLLYAI_TOKEN = $created.token
 $env:VOLLYAI_INSTANCE_ID = $InstanceKey
 $env:VOLLYAI_MAX_CONCURRENCY = [string]$Concurrency
 $env:VOLLYAI_REID_EVERY = [string]$ReIdEvery
-$env:VOLLYAI_COURT_MODEL = $CourtModel
-$env:VOLLYAI_COURT_IMGSZ = [string]$CourtImageSize
-$env:VOLLYAI_COURT_BATCH_SIZE = "16"
-$env:VOLLYAI_COURT_DECODER = "auto"
 $env:VOLLYAI_REID_FEATURE_ENABLED = "true"
 $env:VOLLYAI_REID_ASSOCIATION_ENABLED = "true"
 $env:VOLLYAI_IDENTITY_PREVIEW_ENABLED = "true"
-$env:VOLLYAI_REID_VLM_ENABLED = if ($EnableReidVlm) { "true" } else { "false" }
+$env:VOLLYAI_LOCAL_TRACKER = "deep_eiou"
+$env:VOLLYAI_LOCAL_SAM3_ENABLED = if ($DisableLocalSam3) { "false" } else { "true" }
+$env:VOLLYAI_LOCAL_SAM3_PYTHON = Join-Path $projectRoot "..\volley-ai\upstream\selective-mask-propagation\.venv\Scripts\python.exe"
+$env:VOLLYAI_LOCAL_SAM3_BRIDGE = Join-Path $projectRoot "scripts\run_selective_sam3.py"
 $env:VOLLYAI_WORKSPACE = Join-Path $projectRoot ".artifacts\workspaces"
 
 $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
@@ -52,7 +49,9 @@ $stdout = Join-Path $projectRoot ".artifacts\online-worker-$stamp.stdout.log"
 $stderr = Join-Path $projectRoot ".artifacts\online-worker-$stamp.stderr.log"
 $process = Start-Process `
     -FilePath $workerExecutable `
-    -ArgumentList $(if ($EnableReidVlm) { "--enable-reid-vlm" } else { "--disable-reid-vlm" }) `
+    -ArgumentList @(
+        $(if ($DisableLocalSam3) { "--disable-local-sam3" } else { "--enable-local-sam3" })
+    ) `
     -WorkingDirectory $projectRoot `
     -WindowStyle Hidden `
     -RedirectStandardOutput $stdout `

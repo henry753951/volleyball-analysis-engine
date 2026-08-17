@@ -6,6 +6,7 @@ import hashlib
 import importlib
 import sys
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
@@ -21,6 +22,7 @@ from .inference import (
     ProgressReporter,
     normalize_frame_bbox,
 )
+from .local_tracking import DeepEiouTracker, SelectiveSam3Augmenter, SelectiveSam3Result
 from .records import (
     ActionObservation,
     BallObservation,
@@ -120,6 +122,13 @@ class VolleyballMultitaskObservationProvider:
         reid_every: int = 1,
         fp16: bool = True,
         warmup: bool = True,
+        local_tracker: str = "deep_eiou",
+        local_sam3_enabled: bool = True,
+        local_sam3_python: Path = Path(
+            "../volley-ai/upstream/selective-mask-propagation/.venv/Scripts/python.exe"
+        ),
+        local_sam3_bridge: Path = Path("scripts/run_selective_sam3.py"),
+        local_sam3_timeout_seconds: int = 1800,
         pose_keypoint_confidence: float = 0.3,
         pose_minimum_keypoints: int = 4,
     ) -> None:
@@ -133,6 +142,10 @@ class VolleyballMultitaskObservationProvider:
         self.reid_every = max(1, reid_every)
         self.fp16 = fp16
         self.warmup = warmup
+        if local_tracker not in {"deep_eiou", "harmonic"}:
+            raise ValueError(f"unsupported local tracker: {local_tracker}")
+        self.local_tracker = local_tracker
+        self.smp_root = smp_root
         self.pose_keypoint_confidence = pose_keypoint_confidence
         self.pose_minimum_keypoints = pose_minimum_keypoints
         self._predictor: Any = None
@@ -145,11 +158,18 @@ class VolleyballMultitaskObservationProvider:
             checkpoint=osnet_checkpoint,
             device=device,
         )
+        self._sam3 = SelectiveSam3Augmenter(
+            enabled=local_sam3_enabled and local_tracker == "deep_eiou",
+            python=local_sam3_python,
+            bridge=local_sam3_bridge,
+            smp_root=smp_root,
+            timeout_seconds=local_sam3_timeout_seconds,
+        )
 
     @property
     def effective_backend(self) -> str:
         """Describe the temporal inference backend for doctor output."""
-        return "volleyball-inference-sdk-centered-batch"
+        return f"volleyball-inference-sdk-centered-batch+{self.local_tracker}"
 
     def validate_assets(self) -> None:
         """Fail before worker registration when model code or weights are absent."""
@@ -159,6 +179,12 @@ class VolleyballMultitaskObservationProvider:
             raise FileNotFoundError(f"missing volleyball multitask checkpoint: {self.checkpoint}")
         if self.config is not None and not self.config.is_file():
             raise FileNotFoundError(f"missing volleyball multitask config: {self.config}")
+        if self.local_tracker == "deep_eiou":
+            tracker_source = (
+                self.smp_root / "selective_mask_propagation" / "deep_eiou" / "tracker.py"
+            )
+            if not tracker_source.is_file():
+                raise FileNotFoundError(f"missing DeepEIOU tracker source: {tracker_source}")
 
     def prepare(self, report: ProgressReporter | None = None) -> None:
         """Load and warm the multitask model and run-local tracking encoder once."""
@@ -214,10 +240,7 @@ class VolleyballMultitaskObservationProvider:
         )
         expected_frames = int(job.clip.video.total_frames)
         fps = float(job.clip.video.fps.num) / float(job.clip.video.fps.den)
-        tracker = HarmonicMeanTracker(
-            max_lost_frames=max(60, round(fps * 12.0)),
-            max_geometry_lost_frames=max(60, round(fps * 2.0)),
-        )
+        tracker: Any = None
         ball_tracker = BallTrajectoryTracker()
         players: dict[int, tuple[PlayerObservation, ...]] = {}
         courts: dict[int, CourtFrame] = {}
@@ -243,6 +266,8 @@ class VolleyballMultitaskObservationProvider:
                     else int(predictor.frame_num) - 1
                 )
                 frame = np.asarray(clip[output_slot], dtype=np.uint8)
+                if tracker is None:
+                    tracker = self._build_tracker(fps=fps, width=width, height=height)
                 started = perf_counter()
                 frame_players, frame_poses, frame_actions = self._people(
                     raw,
@@ -277,6 +302,32 @@ class VolleyballMultitaskObservationProvider:
             raise ValueError(
                 f"decoded frame count mismatch: job={expected_frames}, decoded={frame_count}"
             )
+        sam3_started = perf_counter()
+        sam3_result = SelectiveSam3Result("not_applicable", (), 0, 0)
+        if isinstance(tracker, DeepEiouTracker):
+            report(0.705, "selective_sam3_local_reid")
+            sam3_result = self._sam3.augment(
+                clip_path=clip_path,
+                tracks=tracker.tracks,
+                margins=tracker.margins,
+            )
+            if sam3_result.rename_events:
+                try:
+                    players, poses, actions = self._remap_local_identities(
+                        players,
+                        poses,
+                        actions,
+                        sam3_result,
+                    )
+                except RuntimeError as exc:
+                    sam3_result = SelectiveSam3Result(
+                        "invalid_output_fallback_deep_eiou",
+                        (),
+                        sam3_result.window_count,
+                        sam3_result.swap_count,
+                        str(exc),
+                    )
+        timing["sam3_seconds"] = perf_counter() - sam3_started
         return InferenceResult(
             players=players,
             courts=courts,
@@ -293,7 +344,18 @@ class VolleyballMultitaskObservationProvider:
                 "court_detector": "volleyball-multitask-v2-court60",
                 "action_source": "volleyball-multitask-v2",
                 "group_activity_source": "volleyball-multitask-v2",
-                "tracker": "harmonic-mean-eiou+OSNet-run-local",
+                "tracker": (
+                    "deep-eiou+OSNet-run-local"
+                    if isinstance(tracker, DeepEiouTracker)
+                    else "harmonic-mean-eiou+OSNet-run-local"
+                ),
+                "selective_sam3": {
+                    "status": sam3_result.status,
+                    "window_count": sam3_result.window_count,
+                    "swap_count": sam3_result.swap_count,
+                    "rename_event_count": len(sam3_result.rename_events),
+                    "fallback_reason": sam3_result.stderr_tail,
+                },
                 "sdk_schema_version": self._sdk_version,
                 "checkpoint_sha256": _sha256(self.checkpoint),
                 "detector_stride": 1,
@@ -335,6 +397,60 @@ class VolleyballMultitaskObservationProvider:
         if batch:
             yield batch
 
+    def _build_tracker(self, *, fps: float, width: int, height: int) -> Any:
+        if self.local_tracker == "deep_eiou":
+            return DeepEiouTracker(
+                smp_root=self.smp_root,
+                fps=fps,
+                frame_width=width,
+                frame_height=height,
+            )
+        return HarmonicMeanTracker(
+            max_lost_frames=max(60, round(fps * 12.0)),
+            max_geometry_lost_frames=max(60, round(fps * 2.0)),
+        )
+
+    @staticmethod
+    def _remap_local_identities(
+        players: dict[int, tuple[PlayerObservation, ...]],
+        poses: dict[int, tuple[PersonPoseObservation, ...]],
+        actions: dict[tuple[int, int], ActionObservation],
+        result: SelectiveSam3Result,
+    ) -> tuple[
+        dict[int, tuple[PlayerObservation, ...]],
+        dict[int, tuple[PersonPoseObservation, ...]],
+        dict[tuple[int, int], ActionObservation],
+    ]:
+        remapped_players: dict[int, tuple[PlayerObservation, ...]] = {}
+        for frame_index, frame_players in players.items():
+            canonical_ids = [
+                result.resolve(player.track_id, frame_index) for player in frame_players
+            ]
+            if len(canonical_ids) != len(set(canonical_ids)):
+                raise RuntimeError(
+                    f"SAM3 produced co-visible Local ID collision at frame {frame_index}"
+                )
+            remapped_players[frame_index] = tuple(
+                replace(player, track_id=canonical_id)
+                for player, canonical_id in zip(frame_players, canonical_ids, strict=True)
+            )
+        remapped_poses = {
+            frame_index: tuple(
+                replace(
+                    pose,
+                    track_id=result.resolve(pose.track_id, frame_index),
+                )
+                for pose in frame_poses
+            )
+            for frame_index, frame_poses in poses.items()
+        }
+        remapped_actions: dict[tuple[int, int], ActionObservation] = {}
+        for action in actions.values():
+            canonical_id = result.resolve(action.track_id, action.frame_index)
+            remapped = replace(action, track_id=canonical_id)
+            remapped_actions[(action.frame_index, canonical_id)] = remapped
+        return remapped_players, remapped_poses, remapped_actions
+
     def _people(
         self,
         raw: dict[str, Any],
@@ -343,7 +459,7 @@ class VolleyballMultitaskObservationProvider:
         frame_index: int,
         width: int,
         height: int,
-        tracker: HarmonicMeanTracker,
+        tracker: Any,
     ) -> tuple[
         tuple[PlayerObservation, ...],
         tuple[PersonPoseObservation, ...],
@@ -451,7 +567,9 @@ class VolleyballMultitaskObservationProvider:
         boxes: NDArray[np.float32],
         frame_index: int,
     ) -> NDArray[np.float32] | None:
-        if frame_index % self.reid_every != 0 or not len(boxes):
+        if not len(boxes):
+            return None
+        if self.local_tracker != "deep_eiou" and frame_index % self.reid_every != 0:
             return None
         height, width = frame.shape[:2]
         crops: list[NDArray[np.uint8]] = []

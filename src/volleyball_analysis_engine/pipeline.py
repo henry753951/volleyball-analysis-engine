@@ -37,29 +37,38 @@ from .records import (
 )
 
 ProgressReporter = Callable[[float, str], None]
+COURT_SIDE_DEADBAND = 0.04
+MIN_COURT_SIDE_OBSERVATIONS = 5
+MIN_COURT_SIDE_SHARE = 0.65
 
 
 def _noop_progress(_progress: float, _stage: str) -> None:
     """Accept progress updates when no reporter was supplied."""
 
 
-def _resolve_track_court_sides(frames: list[FrameObservation]) -> dict[int, str]:
-    """Resolve a run-local track's stable court side without roster assumptions."""
+def resolve_track_court_sides(frames: list[FrameObservation]) -> dict[int, str]:
+    """Resolve a stable side while abstaining through court jitter and short tracks."""
     counts: dict[int, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     for frame in frames:
         for player in frame.players:
-            counts[player.track_id][player.court_side] += 1
+            if player.court_pos is None:
+                counts[player.track_id]["unknown"] += 1
+            elif player.court_pos[0] < 0.5 - COURT_SIDE_DEADBAND:
+                counts[player.track_id]["left"] += 1
+            elif player.court_pos[0] > 0.5 + COURT_SIDE_DEADBAND:
+                counts[player.track_id]["right"] += 1
+            else:
+                counts[player.track_id]["unknown"] += 1
     resolved: dict[int, str] = {}
     for track_id, side_counts in counts.items():
         left_count = side_counts["left"]
         right_count = side_counts["right"]
-        resolved[track_id] = (
-            "unknown"
-            if left_count == right_count
-            else "left"
-            if left_count > right_count
-            else "right"
-        )
+        usable = left_count + right_count
+        leading = max(left_count, right_count)
+        if usable < MIN_COURT_SIDE_OBSERVATIONS or leading / usable < MIN_COURT_SIDE_SHARE:
+            resolved[track_id] = "unknown"
+        else:
+            resolved[track_id] = "left" if left_count > right_count else "right"
     return resolved
 
 
@@ -632,7 +641,6 @@ class AnalysisPipeline:
                 homographies,
                 frame_width=frame_width,
                 frame_height=frame_height,
-                terminal=spec.is_terminal,
             )
             if actor is not None and association.player is not None:
                 action = self._nearest_action(
@@ -760,7 +768,6 @@ class AnalysisPipeline:
         *,
         frame_width: int,
         frame_height: int,
-        terminal: bool,
     ) -> dict[str, Any] | None:
         if player is not None and player.court_pos is not None:
             return {
@@ -769,11 +776,12 @@ class AnalysisPipeline:
                 "court_pos": {"x": player.court_pos[0], "y": player.court_pos[1]},
                 "confidence": 0.85,
             }
-        if not terminal or ball is None or observation_frame is None:
+        if ball is None:
             return None
-        homography = homographies.get(observation_frame)
+        projection_frame = observation_frame if observation_frame is not None else ball.frame_index
+        homography = homographies.get(projection_frame)
         if homography is None and homographies:
-            nearest_frame = min(homographies, key=lambda frame: abs(frame - observation_frame))
+            nearest_frame = min(homographies, key=lambda frame: abs(frame - projection_frame))
             homography = homographies[nearest_frame]
         if homography is None:
             return None
@@ -792,7 +800,7 @@ class AnalysisPipeline:
 
     @staticmethod
     def _build_tracks(frames: list[FrameObservation]) -> list[dict[str, Any]]:
-        court_sides = _resolve_track_court_sides(frames)
+        court_sides = resolve_track_court_sides(frames)
         observations: dict[int, list[PlayerObservation]] = defaultdict(list)
         for frame in frames:
             for player in frame.players:

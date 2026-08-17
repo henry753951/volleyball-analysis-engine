@@ -32,19 +32,19 @@ def _parser() -> argparse.ArgumentParser:
     worker = subcommands.add_parser(
         "worker", help="connect to the central system and process leased jobs"
     )
-    vlm_group = worker.add_mutually_exclusive_group()
-    vlm_group.add_argument(
-        "--enable-reid-vlm",
-        dest="reid_vlm_enabled",
+    sam3_group = worker.add_mutually_exclusive_group()
+    sam3_group.add_argument(
+        "--enable-local-sam3",
+        dest="local_sam3_enabled",
         action="store_true",
         default=None,
-        help="enable the optional jersey-number VLM inside ReID feature work",
+        help="enable selective SAM3 correction after DeepEIOU tracking",
     )
-    vlm_group.add_argument(
-        "--disable-reid-vlm",
-        dest="reid_vlm_enabled",
+    sam3_group.add_argument(
+        "--disable-local-sam3",
+        dest="local_sam3_enabled",
         action="store_false",
-        help="disable VLM loading and VLM capability advertisement",
+        help="keep DeepEIOU Local IDs without selective SAM3 correction",
     )
     offline = subcommands.add_parser("offline", help="infer one local clip without network access")
     offline.add_argument("--job", type=Path, required=True)
@@ -89,9 +89,9 @@ def worker_main() -> None:
 def _settings_from_arguments(arguments: argparse.Namespace) -> Settings:
     """Load environment settings and apply explicit worker CLI overrides."""
     settings = Settings()
-    reid_vlm_enabled = getattr(arguments, "reid_vlm_enabled", None)
-    if reid_vlm_enabled is not None:
-        settings = settings.model_copy(update={"reid_vlm_enabled": reid_vlm_enabled})
+    local_sam3_enabled = getattr(arguments, "local_sam3_enabled", None)
+    if local_sam3_enabled is not None:
+        settings = settings.model_copy(update={"local_sam3_enabled": local_sam3_enabled})
     return settings
 
 

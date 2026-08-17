@@ -13,12 +13,12 @@ import hashlib
 import importlib
 import json
 import math
-import re
 import sys
+import types
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 import cv2
@@ -37,18 +37,12 @@ from volleyball_monitoring_ai import (
     decode_person_pose_evidence_chunk,
     validate_analysis_data_bytes,
 )
-from volleyball_monitoring_ai.provider_work import (
-    ImmutableArtifactReference,
-    ReidJerseyVlmRawResponse,
-    ReidJerseyVlmResponseBundle,
-)
+from volleyball_monitoring_ai.provider_work import ImmutableArtifactReference
 
-from .inference import Rtv4X3DObservationProvider
 from .nested_reid import NestedPartDescriptorExtractor
 
 JSON_CONTENT_TYPE = "application/json"
 DESCRIPTOR_CONTENT_TYPE = "application/vnd.volleyball.reid-descriptors+octet-stream;version=1"
-VLM_CONTENT_TYPE = "application/vnd.volleyball.reid-jersey-vlm-responses+json;version=1"
 L_SHOULDER, R_SHOULDER, L_HIP, R_HIP = 5, 6, 11, 12
 TORSO_KEYPOINTS = (L_SHOULDER, R_SHOULDER, L_HIP, R_HIP)
 VECTOR_DIMENSIONS = {"DINO": 384, "OSNET": 512, "KPR": 4096, "KPR_PROMPT": 4096}
@@ -57,8 +51,47 @@ SUPPORTED_RECIPES = {
     "OSNET": "sports-osnet/x1/v1",
     "KPR": "kpr/plain/v1",
     "KPR_PROMPT": "kpr/coco17-prompt/v1",
-    "JERSEY_VLM": "jersey-vlm/qwen-v1",
 }
+
+
+def _install_cython_bbox_fallback() -> None:
+    """Install the tiny cython_bbox API required by the upstream OSNet package."""
+    try:
+        importlib.import_module("cython_bbox")
+    except ModuleNotFoundError:
+        pass
+    else:
+        return
+
+    module = types.ModuleType("cython_bbox")
+
+    def bbox_overlaps(
+        boxes: NDArray[np.float64],
+        query_boxes: NDArray[np.float64],
+    ) -> NDArray[np.float64]:
+        output = np.zeros((len(boxes), len(query_boxes)), dtype=np.float64)
+        for index, box in enumerate(boxes):
+            left = np.maximum(box[0], query_boxes[:, 0])
+            top = np.maximum(box[1], query_boxes[:, 1])
+            right = np.minimum(box[2], query_boxes[:, 2])
+            bottom = np.minimum(box[3], query_boxes[:, 3])
+            intersection = np.maximum(0.0, right - left) * np.maximum(0.0, bottom - top)
+            box_area = max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+            query_area = np.maximum(0.0, query_boxes[:, 2] - query_boxes[:, 0]) * np.maximum(
+                0.0,
+                query_boxes[:, 3] - query_boxes[:, 1],
+            )
+            union = box_area + query_area - intersection
+            output[index] = np.divide(
+                intersection,
+                union,
+                out=np.zeros_like(intersection),
+                where=union > 0,
+            )
+        return output
+
+    module.bbox_overlaps = bbox_overlaps  # type: ignore[attr-defined]
+    sys.modules["cython_bbox"] = module
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -151,124 +184,6 @@ class ReidFeatureArtifacts:
     result: ReidFeatureResult
 
 
-class JerseyVlm(Protocol):
-    model_namespace: str
-
-    def identify(
-        self,
-        *,
-        crops: list[SelectedCrop],
-        candidates: list[tuple[str, int, str | None]],
-    ) -> tuple[str, str]:
-        """Return the exact prompt and exact raw response."""
-        ...
-
-
-class CandidateConstrainedJerseyVlm:
-    """Local Qwen VLM wrapper ported from the contributor branch with abstention."""
-
-    model_namespace = "jersey-vlm/qwen-v1"
-
-    def __init__(
-        self,
-        *,
-        model_id: str = "Qwen/Qwen3-VL-8B-Instruct",
-        device: str = "cuda:0",
-        dtype: str = "bfloat16",
-        max_new_tokens: int = 300,
-    ) -> None:
-        self.model_id = model_id
-        self.device = device
-        self.dtype = dtype
-        self.max_new_tokens = max_new_tokens
-        self._processor: Any = None
-        self._model: Any = None
-
-    def _prepare(self) -> None:
-        if self._model is not None:
-            return
-        import torch
-        from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
-
-        dtype = {"bfloat16": torch.bfloat16, "float16": torch.float16}[self.dtype]
-        self._processor = cast("Any", AutoProcessor).from_pretrained(self.model_id)
-        self._model = (
-            cast("Any", Qwen3VLForConditionalGeneration)
-            .from_pretrained(self.model_id, dtype=dtype)
-            .to(self.device)
-            .eval()
-        )
-
-    @staticmethod
-    def _prompt(candidates: list[tuple[str, int, str | None]]) -> str:
-        lines = [
-            f"- roster_entry_id={entry_id}, jersey_number={number}, name={name or 'unknown'}"
-            for entry_id, number, name in candidates
-        ]
-        return (
-            "All images show the same tracked volleyball player in one rally. "
-            "Choose only from the roster entries below and never invent a player. "
-            "Use the jersey number as primary evidence. If it is not reliably readable, "
-            "return unknown. Return JSON only with roster_entry_id, jersey_number, "
-            "decision (candidate or unknown), confidence, and alternatives.\n" + "\n".join(lines)
-        )
-
-    @staticmethod
-    def _sheet(crops: list[SelectedCrop]) -> Any:
-        from PIL import Image
-
-        resample = cast("Any", Image.Resampling.LANCZOS)
-        tiles = []
-        for selected in crops:
-            rgb = cv2.cvtColor(selected.crop, cv2.COLOR_BGR2RGB)
-            image = Image.fromarray(rgb)
-            tiles.append(image.resize((image.width * 4, image.height * 4), resample))
-        width = max(tile.width for tile in tiles)
-        height = max(tile.height for tile in tiles)
-        columns = min(3, len(tiles))
-        rows = math.ceil(len(tiles) / columns)
-        sheet = Image.new("RGB", (columns * width, rows * height), (18, 18, 18))
-        for index, tile in enumerate(tiles):
-            row, column = divmod(index, columns)
-            sheet.paste(tile, (column * width, row * height))
-        return sheet
-
-    def identify(
-        self,
-        *,
-        crops: list[SelectedCrop],
-        candidates: list[tuple[str, int, str | None]],
-    ) -> tuple[str, str]:
-        import torch
-
-        self._prepare()
-        prompt = self._prompt(candidates)
-        messages: list[dict[str, Any]] = [
-            {
-                "role": "system",
-                "content": [{"type": "text", "text": "You are precise and never guess."}],
-            },
-            {
-                "role": "user",
-                "content": [{"type": "image"}, {"type": "text", "text": prompt}],
-            },
-        ]
-        chat = self._processor.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self._processor(text=[chat], images=[self._sheet(crops)], return_tensors="pt").to(
-            self.device
-        )
-        with torch.no_grad():
-            generated = self._model.generate(
-                **inputs, max_new_tokens=self.max_new_tokens, do_sample=False
-            )
-        response = self._processor.decode(
-            generated[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
-        )
-        return prompt, cast("str", response)
-
-
 class SportsOsnetCropEncoder:
     """Standalone Sports OSNet crop encoder for the independent feature job."""
 
@@ -288,7 +203,7 @@ class SportsOsnetCropEncoder:
         root = str(self.smp_root.resolve())
         if root not in sys.path:
             sys.path.insert(0, root)
-        Rtv4X3DObservationProvider._install_cython_bbox_fallback()
+        _install_cython_bbox_fallback()
         import torch
 
         self._torch = torch
@@ -466,44 +381,6 @@ def _decode_selected(
     return selected
 
 
-def _parse_vlm_response(
-    raw: str, candidates: list[tuple[str, int, str | None]]
-) -> tuple[list[int], bool, str | None]:
-    allowed_by_id = {entry_id: number for entry_id, number, _ in candidates}
-    allowed_numbers = set(allowed_by_id.values())
-    match = re.search(r"\{.*\}", raw, re.DOTALL)
-    if match is None:
-        return [], True, "response did not contain a JSON object"
-    try:
-        payload = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return [], True, "response JSON was invalid"
-    if payload.get("decision") == "unknown":
-        return [], True, "model abstained"
-    ranking: list[int] = []
-    entry_id = payload.get("roster_entry_id") or payload.get("roster_player_id")
-    if isinstance(entry_id, str) and entry_id in allowed_by_id:
-        ranking.append(allowed_by_id[entry_id])
-    number = payload.get("jersey_number")
-    try:
-        parsed_number = int(number)
-    except (TypeError, ValueError):
-        parsed_number = -1
-    if parsed_number in allowed_numbers and parsed_number not in ranking:
-        ranking.append(parsed_number)
-    for alternative in payload.get("alternatives") or []:
-        if alternative in allowed_by_id:
-            value = allowed_by_id[alternative]
-        else:
-            try:
-                value = int(alternative)
-            except (TypeError, ValueError):
-                continue
-        if value in allowed_numbers and value not in ranking:
-            ranking.append(value)
-    return (ranking, False, None) if ranking else ([], True, "no valid roster candidate")
-
-
 def _aggregate_kpr(values: NDArray[np.float32], indices: list[int]) -> NDArray[np.float32]:
     embeddings = values[indices, 1:]
     parts = []
@@ -524,13 +401,12 @@ def build_reid_feature_artifacts(
     inputs: ReidFeatureInputs,
     nested: NestedPartDescriptorExtractor,
     osnet: SportsOsnetCropEncoder,
-    vlm: JerseyVlm | None,
     batch_size: int = 32,
     candidate_count: int = 60,
     top_k: int = 6,
     min_gap: int = 8,
 ) -> ReidFeatureArtifacts:
-    """Build versioned descriptor/VLM evidence without recomputing person pose."""
+    """Build versioned appearance descriptors without recomputing person pose."""
     for label, payload in (
         ("analysis evidence manifest", inputs.analysis_manifest),
         ("pose evidence manifest", inputs.pose_manifest),
@@ -634,9 +510,6 @@ def build_reid_feature_artifacts(
     if unsupported:
         message = f"unsupported ReID feature recipes: {unsupported}"
         raise ValueError(message)
-    if vlm is not None and vlm.model_namespace != SUPPORTED_RECIPES["JERSEY_VLM"]:
-        message = f"VLM namespace mismatch: {vlm.model_namespace}"
-        raise ValueError(message)
     vectors_by_track: dict[int, dict[str, NDArray[np.float32]]] = defaultdict(dict)
     unavailable: list[dict[str, Any]] = []
 
@@ -653,7 +526,7 @@ def build_reid_feature_artifacts(
 
     missing_crops = [track_id for track_id in ordered_tracks if not indices_by_track[track_id]]
     for modality in recipes:
-        if modality != "JERSEY_VLM" and missing_crops:
+        if missing_crops:
             unavailable_for(
                 modality, "NO_USABLE_CROPS", "no selected crop was usable", missing_crops
             )
@@ -688,75 +561,6 @@ def build_reid_feature_artifacts(
         except Exception as error:
             for modality in sorted(kpr_modalities):
                 unavailable_for(modality, "MODEL_UNAVAILABLE", str(error), list(indices_by_track))
-
-    roster_by_side: dict[str, list[tuple[str, int, str | None]]] = defaultdict(list)
-    for team in roster.teams:
-        for entry in team.entries:
-            if not entry.active or not entry.jersey_number.isdigit():
-                continue
-            number = int(entry.jersey_number)
-            if 0 <= number <= 99:
-                roster_by_side[team.court_side].append(
-                    (entry.roster_entry_id, number, entry.display_name)
-                )
-    raw_responses: list[ReidJerseyVlmRawResponse] = []
-    jersey_by_track: dict[int, dict[str, Any]] = {}
-    if "JERSEY_VLM" in recipes:
-        if vlm is None:
-            unavailable_for(
-                "JERSEY_VLM",
-                "MODEL_DISABLED",
-                "candidate-constrained VLM is disabled",
-                ordered_tracks,
-            )
-        else:
-            all_candidates = roster_by_side["LEFT"] + roster_by_side["RIGHT"]
-            for track_id in ordered_tracks:
-                crops = selected_by_track.get(track_id, [])
-                side = track_map[track_id].court_side.upper()
-                candidates = roster_by_side.get(side, []) if side != "UNKNOWN" else all_candidates
-                if not crops:
-                    unavailable_for(
-                        "JERSEY_VLM", "NO_USABLE_CROPS", "no selected crop was usable", [track_id]
-                    )
-                    continue
-                if not candidates:
-                    unavailable_for(
-                        "JERSEY_VLM",
-                        "NO_ROSTER_CANDIDATES",
-                        "no active numeric roster candidates",
-                        [track_id],
-                    )
-                    continue
-                try:
-                    prompt, raw = vlm.identify(crops=crops, candidates=candidates)
-                except Exception as error:
-                    unavailable_for("JERSEY_VLM", "MODEL_UNAVAILABLE", str(error), [track_id])
-                    continue
-                numbers, abstained, reason = _parse_vlm_response(raw, candidates)
-                tracklet_id = tracklet_ids[track_id]
-                response_key = f"{tracklet_id}:jersey-vlm"
-                selected_frames = [str(crop.frame_index) for crop in crops]
-                response = ReidJerseyVlmRawResponse(
-                    response_key=response_key,
-                    tracklet_id=tracklet_id,
-                    model_namespace=recipes["JERSEY_VLM"],
-                    prompt_sha256=hashlib.sha256(prompt.encode()).hexdigest(),
-                    selected_frame_indices=selected_frames,
-                    raw_response=raw,
-                    raw_response_sha256=hashlib.sha256(raw.encode()).hexdigest(),
-                    candidate_numbers=numbers,
-                    abstained=abstained,
-                    reason=reason,
-                )
-                raw_responses.append(response)
-                jersey_by_track[track_id] = {
-                    "model_namespace": recipes["JERSEY_VLM"],
-                    "raw_response_key": response_key,
-                    "raw_response_sha256": response.raw_response_sha256,
-                    "candidate_numbers": numbers,
-                    "selected_frame_indices": selected_frames,
-                }
 
     descriptor = bytearray()
     tracklet_payloads = []
@@ -804,7 +608,6 @@ def build_reid_feature_artifacts(
                     tracklet_ids[value] for value in cannot_links[track_id]
                 ],
                 "vectors": vector_payloads,
-                "jersey_vlm": jersey_by_track.get(track_id),
             }
         )
 
@@ -816,45 +619,14 @@ def build_reid_feature_artifacts(
         content_type=DESCRIPTOR_CONTENT_TYPE,
     )
     callback_artifacts: list[ProviderResultArtifact] = []
-    vlm_ref = None
-    if raw_responses:
-        vlm_body = {
-            "schema_version": "1.0.0",
-            "provider_job_id": request.provider_job_id,
-            "evidence_set_id": request.evidence_set_id,
-            "responses": [response.model_dump(mode="json") for response in raw_responses],
-        }
-        vlm_bundle = ReidJerseyVlmResponseBundle.model_validate(
-            {**vlm_body, "content_sha256": _semantic_hash(vlm_body)}
-        )
-        vlm_bytes = _json_bytes(vlm_bundle.model_dump(mode="json"))
-        vlm_ref = _artifact_reference(
-            artifact_id=f"{request.evidence_set_id}:jersey-vlm-responses",
-            kind="JERSEY_VLM_RESPONSE",
-            data=vlm_bytes,
-            content_type=VLM_CONTENT_TYPE,
-        )
-        callback_artifacts.append(
-            ProviderResultArtifact(
-                part_name="jersey_vlm_responses",
-                kind=vlm_ref.kind,
-                schema_version=vlm_ref.schema_version,
-                content_type=vlm_ref.content_type,
-                data=vlm_bytes,
-                filename="jersey-vlm-responses.json",
-            )
-        )
     result_body = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "provider_job_id": request.provider_job_id,
         "evidence_set_id": request.evidence_set_id,
         "analysis_run_id": request.analysis_run_id,
         "match_id": request.match_id,
         "status": "PARTIAL" if unavailable else "READY",
         "descriptor_artifact": descriptor_ref.model_dump(mode="json"),
-        "jersey_vlm_response_artifact": (
-            vlm_ref.model_dump(mode="json") if vlm_ref is not None else None
-        ),
         "tracklets": tracklet_payloads,
         "unavailable_evidence": unavailable,
     }
@@ -867,7 +639,7 @@ def build_reid_feature_artifacts(
         ProviderResultArtifact(
             part_name="reid_feature_result",
             kind="REID_FEATURE_RESULT",
-            schema_version="1.0.0",
+            schema_version="2.0.0",
             content_type=JSON_CONTENT_TYPE,
             data=result_bytes,
             filename="reid-feature-result.json",

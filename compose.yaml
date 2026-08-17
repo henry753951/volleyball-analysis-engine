@@ -8,7 +8,7 @@ services:
       - path: .env
         required: false
     environment:
-      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v1/ai/providers/ws}
+      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v2/ai/providers/ws}
       VOLLYAI_WORKSPACE: /workspaces
       VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cpu}
       VOLLYAI_MULTITASK_SDK_ROOT: /models/volleyball-sdk
@@ -16,7 +16,15 @@ services:
       VOLLYAI_MULTITASK_BATCH_SIZE: ${VOLLYAI_MULTITASK_BATCH_SIZE:-4}
       VOLLYAI_MULTITASK_FP16: ${VOLLYAI_MULTITASK_FP16:-true}
       VOLLYAI_MULTITASK_WARMUP: ${VOLLYAI_MULTITASK_WARMUP:-true}
+      VOLLYAI_LOCAL_TRACKER: ${VOLLYAI_LOCAL_TRACKER:-deep_eiou}
+      # The container does not bundle SAM3 weights/runtime yet; explicitly opt in when mounted.
+      VOLLYAI_LOCAL_SAM3_ENABLED: ${VOLLYAI_LOCAL_SAM3_ENABLED:-false}
+      VOLLYAI_LOCAL_SAM3_PYTHON: ${VOLLYAI_LOCAL_SAM3_PYTHON:-/app/.venv/bin/python}
+      VOLLYAI_LOCAL_SAM3_BRIDGE: ${VOLLYAI_LOCAL_SAM3_BRIDGE:-/app/scripts/run_selective_sam3.py}
       VOLLYAI_REID_EVERY: ${VOLLYAI_REID_EVERY:-1}
+      VOLLYAI_REID_FEATURE_ENABLED: ${VOLLYAI_REID_FEATURE_ENABLED:-false}
+      VOLLYAI_REID_ASSOCIATION_ENABLED: ${VOLLYAI_REID_ASSOCIATION_ENABLED:-true}
+      VOLLYAI_IDENTITY_PREVIEW_ENABLED: ${VOLLYAI_IDENTITY_PREVIEW_ENABLED:-true}
       VOLLYAI_PREWARM_MODELS: ${VOLLYAI_PREWARM_MODELS:-true}
       VOLLYAI_WRITE_DEBUG_ARTIFACTS: ${VOLLYAI_WRITE_DEBUG_ARTIFACTS:-false}
       VOLLYAI_SMP_ROOT: /models/smp
@@ -25,7 +33,7 @@ services:
       - ${VOLLYAI_MULTITASK_SDK_HOST_ROOT:?Set VOLLYAI_MULTITASK_SDK_HOST_ROOT to volleyball_inference_sdk}:/models/volleyball-sdk:ro
       - ${VOLLYAI_SMP_HOST_ROOT:?Set VOLLYAI_SMP_HOST_ROOT}:/models/smp:ro
       - analysis-workspaces:/workspaces
-      - model-cache:/root/.cache
+      - model-cache:/home/worker/.cache
     restart: unless-stopped
     extra_hosts:
       - host.docker.internal:host-gateway

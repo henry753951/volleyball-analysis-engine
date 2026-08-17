@@ -6,11 +6,11 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
   "numpy>=2.2.0",
-  "opencv-python>=4.11.0.86,<5",
+  "lap>=0.5.13",
+  "opencv-python-headless>=4.11.0.86,<5",
   "orjson>=3.10.15",
   "pydantic-settings>=2.10.0",
   "scipy>=1.15.0",
-  "volley-court-lines==0.3.0",
   "volleyball-monitoring-ai-sdk",
 ]
 
@@ -31,7 +31,6 @@ dev = [
 ]
 models = [
   "calflops>=0.3.2",
-  "continual-inference>=1.2.4",
   "faster-coco-eval>=1.6.5",
   "fvcore>=0.1.5",
   "iopath>=0.1.10",
@@ -39,8 +38,6 @@ models = [
   "pytorchvideo>=0.1.5",
   "pyyaml>=6.0.2",
   "tensorboard>=2.20.0",
-  "transformers>=4.55.0",
-  "ultralytics>=8.3.0,<9",
 ]
 
 [project.scripts]
@@ -69,7 +66,6 @@ torchvision = [
   { index = "pytorch-cpu", extra = "cpu" },
   { index = "pytorch-cu130", extra = "cu130" },
 ]
-volley-court-lines = { url = "https://assets.hsulab.net/packages/volley-court-lines/v0.3.0/volley_court_lines-0.3.0-py3-none-any.whl" }
 
 [[tool.uv.index]]
 name = "pytorch-cpu"
@@ -150,6 +146,8 @@ ignore = ["COM812", "CPY001", "D203", "D213", "PLR0913", "TC001", "TC002", "TC00
   "TRY003",
 ]
 "scripts/extract_kpr_pair_features.py" = ["PLC0415"]
+"scripts/download_worker_models.py" = ["S310", "T201"]
+"scripts/run_selective_sam3.py" = ["PLC0415"]
 "src/volleyball_analysis_engine/visual_v5.py" = [
   "ANN401",
   "C901",

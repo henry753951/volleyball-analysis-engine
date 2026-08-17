@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from typing import cast
 
 from volleyball_monitoring_ai import (
     AIJobRequest,
@@ -30,11 +31,45 @@ from .reid_association_job import (
     build_reid_association_artifacts,
 )
 from .reid_feature_job import (
-    CandidateConstrainedJerseyVlm,
     ReidFeatureInputs,
     SportsOsnetCropEncoder,
     build_reid_feature_artifacts,
 )
+
+
+def match_bank_descriptor_artifacts(
+    bank_payload: dict[str, object],
+    historical_inputs: list[tuple[str, str, bytes]],
+) -> dict[str, bytes]:
+    """Resolve stable bank artifact IDs to this job's ephemeral input artifacts."""
+    remaining = list(historical_inputs)
+    resolved: dict[str, bytes] = {}
+    raw_evidence_artifacts = bank_payload.get("evidence_artifacts", [])
+    if not isinstance(raw_evidence_artifacts, list):
+        message = "ReID bank evidence_artifacts must be a list"
+        raise TypeError(message)
+    evidence_artifacts = cast("list[object]", raw_evidence_artifacts)
+    for candidate in evidence_artifacts:
+        if not isinstance(candidate, dict):
+            message = "ReID bank evidence artifact must be an object"
+            raise TypeError(message)
+        row = cast("dict[str, object]", candidate)
+        logical_id = str(row.get("artifact_id", ""))
+        expected_sha = str(row.get("sha256", "")).lower()
+        match_index = next(
+            (index for index, (_, sha256, _) in enumerate(remaining) if sha256 == expected_sha),
+            None,
+        )
+        if not logical_id or logical_id in resolved or match_index is None:
+            message = "historical descriptor inputs do not match the bank snapshot"
+            raise ValueError(message)
+        _, _, data = remaining.pop(match_index)
+        resolved[logical_id] = data
+    if remaining:
+        message = "historical descriptor inputs do not match the bank snapshot"
+        raise ValueError(message)
+    return resolved
+
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,14 +105,11 @@ def provider_work_capabilities(settings: Settings) -> ProviderWorkCapabilities:
             "kpr/coco17-prompt/v1",
             "kpr/plain/v1",
         ]
-        if settings.reid_vlm_enabled:
-            produced_artifact_kinds.append("JERSEY_VLM_RESPONSE")
-            model_recipe_namespaces.append("jersey-vlm/qwen-v1")
         work_capabilities.append(
             {
                 "work_kind": "REID_FEATURE_EXTRACTION",
-                "request_schema_versions": ["1.0.0"],
-                "result_schema_versions": ["1.0.0"],
+                "request_schema_versions": ["2.0.0"],
+                "result_schema_versions": ["2.0.0"],
                 "accepted_input_artifact_kinds": [
                     "CANONICAL_CLIP",
                     "ANALYSIS_DATA",
@@ -97,8 +129,8 @@ def provider_work_capabilities(settings: Settings) -> ProviderWorkCapabilities:
         work_capabilities.append(
             {
                 "work_kind": "REID_ASSOCIATION",
-                "request_schema_versions": ["1.1.0"],
-                "result_schema_versions": ["1.0.0"],
+                "request_schema_versions": ["2.0.0"],
+                "result_schema_versions": ["2.0.0"],
                 "accepted_input_artifact_kinds": [
                     "REID_FEATURE_RESULT",
                     "REID_DESCRIPTOR_BUNDLE",
@@ -238,16 +270,6 @@ async def run_provider_work_worker(settings: Settings) -> None:
         if settings.reid_feature_enabled
         else None
     )
-    feature_vlm = (
-        CandidateConstrainedJerseyVlm(
-            model_id=settings.reid_vlm_model_id,
-            device=settings.device,
-            dtype=settings.reid_vlm_dtype,
-            max_new_tokens=settings.reid_vlm_max_new_tokens,
-        )
-        if settings.reid_feature_enabled and settings.reid_vlm_enabled
-        else None
-    )
     # Model instances and the X3D streamer retain mutable CUDA/runtime state.
     # Provider work may download or upload concurrently, but GPU inference must
     # be serialized unless each lease owns an isolated model instance.
@@ -376,14 +398,13 @@ async def run_provider_work_worker(settings: Settings) -> None:
                 inputs=feature_inputs,
                 nested=feature_nested,
                 osnet=feature_osnet,
-                vlm=feature_vlm,
                 batch_size=settings.reid_feature_batch_size,
                 candidate_count=settings.reid_feature_candidate_frames,
                 top_k=settings.reid_feature_selected_frames,
                 min_gap=settings.reid_feature_min_frame_gap,
             )
         await context.report_progress(0.92, "uploading_reid_feature_evidence")
-        await context.complete(result_schema_version="1.0.0", artifacts=list(result.artifacts))
+        await context.complete(result_schema_version="2.0.0", artifacts=list(result.artifacts))
 
     async def handle_reid_association(context: ProviderWorkContext) -> None:
         request = ReidAssociationJobRequest.model_validate(context.work.request)
@@ -433,12 +454,14 @@ async def run_provider_work_worker(settings: Settings) -> None:
             message = "current feature descriptor bundle is absent from association inputs"
             raise ValueError(message)
         current_descriptors = descriptor_bytes.pop(current_artifact.artifact_id)
-        bank_artifact_ids = {
-            str(item["artifact_id"]) for item in bank_payload.get("evidence_artifacts", [])
-        }
-        if set(descriptor_bytes) != bank_artifact_ids:
-            message = "historical descriptor inputs do not match the bank snapshot"
-            raise ValueError(message)
+        bank_descriptor_bytes = match_bank_descriptor_artifacts(
+            bank_payload,
+            [
+                (item.artifact_id, item.sha256.lower(), descriptor_bytes[item.artifact_id])
+                for item in descriptor_artifacts
+                if item.artifact_id != current_artifact.artifact_id
+            ],
+        )
         await context.report_progress(0.35, "scoring_versioned_reid_association")
         result = await asyncio.to_thread(
             build_reid_association_artifacts,
@@ -448,10 +471,10 @@ async def run_provider_work_worker(settings: Settings) -> None:
                 current_descriptors=current_descriptors,
                 bank_snapshot=bank_payload,
                 roster_snapshot=json.loads(downloads[2].read_text(encoding="utf-8")),
-                bank_descriptor_artifacts=descriptor_bytes,
+                bank_descriptor_artifacts=bank_descriptor_bytes,
             ),
         )
-        await context.complete(result_schema_version="1.0.0", artifacts=list(result.artifacts))
+        await context.complete(result_schema_version="2.0.0", artifacts=list(result.artifacts))
 
     async def handle_identity_preview(context: ProviderWorkContext) -> None:
         request = IdentityPreviewJobRequest.model_validate(context.work.request)
@@ -539,7 +562,12 @@ def build_pipeline(settings: Settings) -> AnalysisPipeline:
         reid_every=settings.reid_every,
         fp16=settings.multitask_fp16,
         warmup=settings.multitask_warmup,
-        pose_keypoint_confidence=settings.person_pose_keypoint_confidence,
-        pose_minimum_keypoints=settings.person_pose_minimum_keypoints,
+        local_tracker=settings.local_tracker,
+        local_sam3_enabled=settings.local_sam3_enabled,
+        local_sam3_python=settings.local_sam3_python,
+        local_sam3_bridge=settings.local_sam3_bridge,
+        local_sam3_timeout_seconds=settings.local_sam3_timeout_seconds,
+        pose_keypoint_confidence=settings.multitask_pose_keypoint_confidence,
+        pose_minimum_keypoints=settings.multitask_pose_minimum_keypoints,
     )
     return AnalysisPipeline(provider, PipelineConfig())

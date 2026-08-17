@@ -27,11 +27,10 @@ COMPONENT_WEIGHTS = {
     "OSNET": 0.20,
     "KPR": 0.35,
     "KPR_PROMPT": 0.35,
-    "JERSEY_VLM": 0.45,
 }
 RESOLVE_THRESHOLD = 0.75
-REVIEW_THRESHOLD = 0.55
 MARGIN_THRESHOLD = 0.12
+SAME_CLIP_NEW_GID_THRESHOLD = 0.86
 
 
 def _json_bytes(payload: dict[str, Any]) -> bytes:
@@ -117,6 +116,60 @@ class _BankVector:
     value: NDArray[np.float32]
 
 
+def soft_lineup_candidate_rows(
+    rows: list[dict[str, Any]],
+    *,
+    reserved: dict[str, list[str]],
+    cannot_link_tracklet_ids: set[str],
+    expected_count: int,
+) -> list[dict[str, Any]]:
+    """Reject impossible co-visibility only; apply lineup size as a score prior."""
+    occupied_covisible_clusters = {
+        cluster_id
+        for cluster_id, owners in reserved.items()
+        if any(owner in cannot_link_tracklet_ids for owner in owners)
+    }
+    available: list[dict[str, Any]] = []
+    for row in rows:
+        cluster_id = str(row["person_cluster_id"])
+        if any(owner in cannot_link_tracklet_ids for owner in reserved.get(cluster_id, [])):
+            continue
+        candidate = dict(row)
+        candidate["scores"] = list(cast("list[dict[str, Any]]", row["scores"]))
+        if (
+            len(occupied_covisible_clusters) >= expected_count
+            and cluster_id not in occupied_covisible_clusters
+        ):
+            candidate["confidence"] = float(candidate["confidence"]) * 0.9
+            candidate["scores"].append(
+                {
+                    "component": "CONSTRAINT",
+                    "value": -0.1,
+                    "model_namespace": "soft-team-occupancy/v1",
+                }
+            )
+        available.append(candidate)
+    available.sort(key=lambda row: (-float(row["confidence"]), str(row["person_cluster_id"])))
+    for rank, row in enumerate(available, 1):
+        row["rank"] = rank
+    return available
+
+
+def _same_clip_similarity(
+    left: dict[str, _CurrentVector], right: dict[str, _CurrentVector]
+) -> float:
+    weighted_sum = 0.0
+    total_weight = 0.0
+    for modality, left_value in left.items():
+        right_value = right.get(modality)
+        if right_value is None or right_value.model_namespace != left_value.model_namespace:
+            continue
+        weight = COMPONENT_WEIGHTS.get(modality, 0.0)
+        weighted_sum += ((_cosine(left_value.value, right_value.value) + 1.0) / 2.0) * weight
+        total_weight += weight
+    return weighted_sum / total_weight if total_weight else 0.0
+
+
 def _decode_current(
     result: ReidFeatureResult, descriptors: bytes
 ) -> dict[str, dict[str, _CurrentVector]]:
@@ -180,19 +233,6 @@ def _decode_bank(bank: ReidBankSnapshot, artifacts: dict[str, bytes]) -> dict[st
     return decoded
 
 
-def _jersey_numbers(roster: ReidRosterSnapshot, team_id: str) -> dict[str, int]:
-    team = next((candidate for candidate in roster.teams if candidate.team_id == team_id), None)
-    if team is None:
-        raise ValueError("bank team is absent from the immutable roster snapshot")
-    result: dict[str, int] = {}
-    for entry in team.entries:
-        if entry.active and entry.jersey_number.isdigit():
-            number = int(entry.jersey_number)
-            if 0 <= number <= 99:
-                result[entry.roster_entry_id] = number
-    return result
-
-
 def build_reid_association_artifacts(
     *, request: ReidAssociationJobRequest, inputs: ReidAssociationInputs
 ) -> ReidAssociationArtifacts:
@@ -219,7 +259,8 @@ def build_reid_association_artifacts(
         raise ValueError("eligible association tracklet is absent from feature evidence")
     current = _decode_current(feature, inputs.current_descriptors)
     history = _decode_bank(bank, inputs.bank_descriptor_artifacts)
-    jersey_by_roster = _jersey_numbers(roster, bank.team_id)
+    if not any(team.team_id == bank.team_id for team in roster.teams):
+        raise ValueError("bank team is absent from the immutable roster snapshot")
     clusters = {cluster.person_cluster_id: cluster for cluster in bank.clusters}
     memberships: dict[str, list[Any]] = defaultdict(list)
     for membership in bank.memberships:
@@ -235,6 +276,8 @@ def build_reid_association_artifacts(
                 direction = 1.0 if membership.evidence_role == "POSITIVE" else -0.65
                 for vector_id in membership.vector_ids:
                     historical = history[vector_id]
+                    if historical.modality not in request.recipe.candidate_modalities:
+                        continue
                     present = current[tracklet_id].get(historical.modality)
                     if present is None or present.model_namespace != historical.model_namespace:
                         continue
@@ -255,23 +298,6 @@ def build_reid_association_artifacts(
                 component_weight = COMPONENT_WEIGHTS.get(component, 0.0)
                 weighted_sum += value * component_weight
                 total_weight += component_weight
-            if tracklet.jersey_vlm is not None and cluster.roster_entry_id in jersey_by_roster:
-                jersey_number = jersey_by_roster[cluster.roster_entry_id]
-                try:
-                    rank = tracklet.jersey_vlm.candidate_numbers.index(jersey_number)
-                except ValueError:
-                    rank = -1
-                if rank >= 0:
-                    value = max(0.55, 1.0 - rank * 0.15)
-                    scores.append(
-                        {
-                            "component": "JERSEY_VLM",
-                            "value": value,
-                            "model_namespace": tracklet.jersey_vlm.model_namespace,
-                        }
-                    )
-                    weighted_sum += value * COMPONENT_WEIGHTS["JERSEY_VLM"]
-                    total_weight += COMPONENT_WEIGHTS["JERSEY_VLM"]
             confidence = weighted_sum / total_weight if total_weight else 0.0
             rows.append(
                 {
@@ -287,7 +313,8 @@ def build_reid_association_artifacts(
             row["rank"] = rank
         candidate_rows[tracklet_id] = rows
 
-    reserved: dict[str, str] = {}
+    reserved: dict[str, list[str]] = defaultdict(list)
+    new_gid_groups: dict[str, list[str]] = {}
     decisions: list[dict[str, Any]] = []
     ordered_tracklets = sorted(
         request.eligible_tracklet_ids,
@@ -300,52 +327,77 @@ def build_reid_association_artifacts(
     for tracklet_id in ordered_tracklets:
         tracklet = feature_by_id[tracklet_id]
         rows = candidate_rows[tracklet_id]
-        available = [
-            row
-            for row in rows
-            if row["person_cluster_id"] not in reserved
-            or reserved[row["person_cluster_id"]] not in tracklet.cannot_link_tracklet_ids
-        ]
+        cannot_link = set(tracklet.cannot_link_tracklet_ids)
+        available = soft_lineup_candidate_rows(
+            rows,
+            reserved=reserved,
+            cannot_link_tracklet_ids=cannot_link,
+            expected_count=request.recipe.team_occupancy_prior.expected_count,
+        )
         top = available[0] if available else None
         second = available[1] if len(available) > 1 else None
         confidence = float(top["confidence"]) if top else 0.0
         margin = confidence - (float(second["confidence"]) if second else 0.0)
         if top is not None and confidence >= RESOLVE_THRESHOLD and margin >= MARGIN_THRESHOLD:
-            state, reason = "RESOLVED", None
+            action = "MATCH_EXISTING_GID"
             selected_cluster = str(top["person_cluster_id"])
             selected_roster = top["roster_entry_id"]
-            reserved[selected_cluster] = tracklet_id
-        elif top is not None and confidence >= REVIEW_THRESHOLD:
-            state, reason = "NEEDS_REVIEW", "candidate confidence or margin is below activation"
-            selected_cluster = selected_roster = None
+            new_gid_group_key = None
+            decision_confidence = confidence
+            rationale = "existing GID passed confidence, margin, and co-visibility checks"
+            reserved[selected_cluster].append(tracklet_id)
         else:
-            state, reason = "UNRESOLVED", "no eligible candidate has sufficient evidence"
+            action = "CREATE_NEW_GID"
             selected_cluster = selected_roster = None
+            reusable_group: str | None = None
+            reusable_similarity = 0.0
+            for group_key, member_tracklet_ids in new_gid_groups.items():
+                if any(
+                    member_id in cannot_link
+                    or tracklet_id in set(feature_by_id[member_id].cannot_link_tracklet_ids)
+                    for member_id in member_tracklet_ids
+                ):
+                    continue
+                similarity = max(
+                    _same_clip_similarity(current[tracklet_id], current[member_id])
+                    for member_id in member_tracklet_ids
+                )
+                if similarity > reusable_similarity:
+                    reusable_group = group_key
+                    reusable_similarity = similarity
+            if reusable_group is not None and reusable_similarity >= SAME_CLIP_NEW_GID_THRESHOLD:
+                new_gid_group_key = reusable_group
+                new_gid_groups[reusable_group].append(tracklet_id)
+                decision_confidence = reusable_similarity
+                rationale = "non-co-visible Local matched a new same-clip GID seed"
+            else:
+                new_gid_group_key = f"new:{request.evidence_set_id}:{bank.team_id}:{tracklet_id}"
+                new_gid_groups[new_gid_group_key] = [tracklet_id]
+                decision_confidence = max(0.6, 1.0 - confidence)
+                rationale = "no existing GID was reliable; activate a new unbound GID"
         decisions.append(
             {
                 "tracklet_id": tracklet_id,
                 "group_key": f"{request.evidence_set_id}:{bank.team_id}",
-                "association_state": state,
+                "action": action,
                 "selected_person_cluster_id": selected_cluster,
+                "new_gid_group_key": new_gid_group_key,
                 "selected_roster_entry_id": selected_roster,
-                "candidates": rows,
-                "unresolved_reason": reason,
+                "confidence": decision_confidence,
+                "candidates": available,
+                "rationale": rationale,
             }
         )
     decisions.sort(
         key=lambda decision: request.eligible_tracklet_ids.index(decision["tracklet_id"])
     )
     body: dict[str, Any] = {
-        "schema_version": "1.0.0",
+        "schema_version": "2.0.0",
         "provider_job_id": request.provider_job_id,
         "association_run_id": request.association_run_id,
         "evidence_set_id": request.evidence_set_id,
         "bank_snapshot_id": request.bank_snapshot_id,
-        "status": (
-            "COMPLETED"
-            if all(decision["association_state"] == "RESOLVED" for decision in decisions)
-            else "NEEDS_REVIEW"
-        ),
+        "status": "COMPLETED",
         "decisions": decisions,
     }
     result = ReidAssociationResult.model_validate({**body, "content_sha256": _semantic_hash(body)})
@@ -355,7 +407,7 @@ def build_reid_association_artifacts(
             ProviderResultArtifact(
                 part_name="reid_association_result",
                 kind="REID_ASSOCIATION_RESULT",
-                schema_version="1.0.0",
+                schema_version="2.0.0",
                 content_type=JSON_CONTENT_TYPE,
                 data=result_bytes,
                 filename="reid-association-result.json",

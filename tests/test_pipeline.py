@@ -11,12 +11,13 @@ from unittest.mock import patch
 from volleyball_monitoring_ai import AIJobRequest, validate_analysis_data_bytes
 
 from volleyball_analysis_engine.inference import InferenceResult
-from volleyball_analysis_engine.pipeline import AnalysisPipeline
+from volleyball_analysis_engine.pipeline import AnalysisPipeline, resolve_track_court_sides
 from volleyball_analysis_engine.records import (
     ActionObservation,
     BallObservation,
     CourtFrame,
     CourtKeypoint,
+    FrameObservation,
     GroupActivityObservation,
     PlayerObservation,
 )
@@ -80,6 +81,38 @@ class FakeProvider:
                     "coordinate_space": "NORMALIZED_VIDEO",
                 },
             },
+        )
+
+
+class NoPlayersProvider(FakeProvider):
+    """Return observed balls and court geometry without any nearby player."""
+
+    def infer(
+        self,
+        clip_path: Path,
+        job: AIJobRequest,
+        report: Callable[[float, str], None],
+    ) -> InferenceResult:
+        """Remove players so representative positions must use ball projection."""
+        base = super().infer(clip_path, job, report)
+        court_points = tuple(
+            CourtKeypoint(index, (x, y), 0.99, (wx, wy))
+            for index, (x, y, wx, wy) in enumerate(
+                [
+                    (0, 0, 0, 0),
+                    (50, 0, 9, 0),
+                    (100, 0, 18, 0),
+                    (100, 100, 18, 9),
+                    (50, 100, 9, 9),
+                    (0, 100, 0, 9),
+                ]
+            )
+        )
+        return replace(
+            base,
+            players=dict.fromkeys(range(base.frame_count), ()),
+            courts={frame: CourtFrame(frame, True, court_points) for frame in range(3)},
+            actions={},
         )
 
 
@@ -270,6 +303,28 @@ def test_pipeline_preserves_authoritative_keypoint_frames_and_builds_analysis_da
     validate_analysis_data_bytes(bundle.analysis_data_bytes)
 
 
+def test_no_player_events_use_ball_projection_without_terminal_marker(tmp_path: Path) -> None:
+    clip = tmp_path / "clip.mp4"
+    clip.write_bytes(b"unit-test")
+
+    bundle = AnalysisPipeline(NoPlayersProvider()).analyze(job(), clip)
+
+    assert [event.association_state for event in bundle.domain.contact_events] == [
+        "no_player",
+        "no_player",
+    ]
+    for event in bundle.domain.contact_events:
+        assert len(event.representative_court_positions) == 1
+        representative = event.representative_court_positions[0]
+        assert representative.track_id is None
+        assert representative.basis == "terminal_projection"
+
+    path = bundle.domain.path_segments[0]
+    assert path.render_state == "complete"
+    assert len(path.start_court_positions) == 1
+    assert len(path.end_court_positions) == 1
+
+
 def test_provider_work_base_analysis_does_not_build_or_publish_reid_bank(
     tmp_path: Path,
 ) -> None:
@@ -399,3 +454,26 @@ def test_pipeline_uses_majority_track_side_resolution(
 
     track_sides = {track.track_id: track.court_side for track in bundle.domain.tracks}
     assert track_sides == {1: "left", 2: "left"}
+
+
+def test_track_side_abstains_for_midline_jitter_and_short_evidence() -> None:
+    frames = [
+        FrameObservation(
+            frame_index=frame_index,
+            players=(
+                PlayerObservation(
+                    frame_index=frame_index,
+                    source_track_id=1,
+                    track_id=1,
+                    frame_bbox=(0.4, 0.2, 0.6, 0.8),
+                    frame_foot_pos=(0.5, 0.8),
+                    court_pos=(court_x, 0.5),
+                    confidence=0.9,
+                ),
+            ),
+            homography_available=True,
+        )
+        for frame_index, court_x in enumerate((0.48, 0.51, 0.47, 0.52, 0.49, 0.5))
+    ]
+
+    assert resolve_track_court_sides(frames) == {1: "unknown"}

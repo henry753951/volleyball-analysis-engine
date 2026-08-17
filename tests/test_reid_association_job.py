@@ -14,6 +14,7 @@ from volleyball_monitoring_ai.provider_work import ReidAssociationJobRequest
 from volleyball_analysis_engine.reid_association_job import (
     ReidAssociationInputs,
     build_reid_association_artifacts,
+    soft_lineup_candidate_rows,
 )
 
 
@@ -47,6 +48,43 @@ def _normalized(dimension: int, index: int = 0) -> bytes:
     vector = np.zeros(dimension, dtype="<f4")
     vector[index] = 1
     return vector.tobytes()
+
+
+def test_soft_lineup_prior_allows_reentry_and_penalizes_a_seventh_covisible_id() -> None:
+    rows: list[dict[str, Any]] = [
+        {"person_cluster_id": f"gid-{index}", "confidence": 0.9, "scores": []}
+        for index in range(1, 8)
+    ]
+    reserved = {f"gid-{index}": [f"old-{index}"] for index in range(1, 7)}
+
+    reentry = soft_lineup_candidate_rows(
+        rows,
+        reserved=reserved,
+        cannot_link_tracklet_ids=set(),
+        expected_count=6,
+    )
+    seventh_covisible = soft_lineup_candidate_rows(
+        rows,
+        reserved=reserved,
+        cannot_link_tracklet_ids={f"old-{index}" for index in range(1, 7)},
+        expected_count=6,
+    )
+
+    assert len(reentry) == 7
+    assert seventh_covisible == [
+        {
+            "person_cluster_id": "gid-7",
+            "confidence": 0.81,
+            "scores": [
+                {
+                    "component": "CONSTRAINT",
+                    "value": -0.1,
+                    "model_namespace": "soft-team-occupancy/v1",
+                }
+            ],
+            "rank": 1,
+        }
+    ]
 
 
 def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
@@ -87,24 +125,15 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
         "sha256": hashlib.sha256(current).hexdigest(),
         "source_frame_indices": ["1"],
     }
-    jersey_artifact = {
-        "artifact_id": str(uuid4()),
-        "kind": "JERSEY_VLM_RESPONSE",
-        "schema_version": "1.0.0",
-        "sha256": "a" * 64,
-        "byte_length": "1",
-        "content_type": "application/vnd.volleyball.reid-jersey-vlm-responses+json;version=1",
-    }
     feature = _semantic(
         {
-            "schema_version": "1.0.0",
+            "schema_version": "2.0.0",
             "provider_job_id": feature_job_id,
             "evidence_set_id": evidence_set_id,
             "analysis_run_id": str(uuid4()),
             "match_id": match_id,
             "status": "READY",
             "descriptor_artifact": current_ref,
-            "jersey_vlm_response_artifact": jersey_artifact,
             "tracklets": [
                 {
                     "tracklet_id": current_tracklet_id,
@@ -115,13 +144,6 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
                     "last_frame_index": "3",
                     "cannot_link_tracklet_ids": [excluded_tracklet_id],
                     "vectors": [vector],
-                    "jersey_vlm": {
-                        "model_namespace": "jersey-vlm/qwen-v1",
-                        "raw_response_key": "response-current",
-                        "raw_response_sha256": "b" * 64,
-                        "candidate_numbers": [11],
-                        "selected_frame_indices": ["1"],
-                    },
                 },
                 {
                     "tracklet_id": excluded_tracklet_id,
@@ -132,7 +154,6 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
                     "last_frame_index": "3",
                     "cannot_link_tracklet_ids": [current_tracklet_id],
                     "vectors": [],
-                    "jersey_vlm": None,
                 },
             ],
             "unavailable_evidence": [],
@@ -216,7 +237,7 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
     )
     request = ReidAssociationJobRequest.model_validate(
         {
-            "schema_version": "1.1.0",
+            "schema_version": "2.0.0",
             "provider_job_id": association_job_id,
             "association_run_id": association_run_id,
             "match_id": match_id,
@@ -228,10 +249,11 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
             "roster_snapshot_artifact_id": str(uuid4()),
             "recipe": {
                 "namespace": "reid/nested-part-v2",
-                "candidate_modalities": ["DINO", "JERSEY_VLM"],
+                "candidate_modalities": ["DINO"],
                 "same_clip_grouping": True,
-                "allow_abstention": True,
+                "allow_new_gid": True,
                 "manual_assignment_precedence": True,
+                "team_occupancy_prior": {"expected_count": 6, "enforcement": "SOFT"},
             },
         }
     )
@@ -251,13 +273,10 @@ def test_association_resolves_only_explicitly_eligible_tracklets() -> None:
     assert len(output.result.decisions) == 1
     decision = output.result.decisions[0]
     assert decision.tracklet_id == current_tracklet_id
-    assert decision.association_state == "RESOLVED"
+    assert decision.action == "MATCH_EXISTING_GID"
     assert decision.selected_person_cluster_id == cluster_id
     assert decision.selected_roster_entry_id == roster_entry_id
-    assert {score.component for score in decision.candidates[0].scores} == {
-        "DINO",
-        "JERSEY_VLM",
-    }
+    assert {score.component for score in decision.candidates[0].scores} == {"DINO"}
     artifact_data = output.artifacts[0].data
     assert isinstance(artifact_data, bytes)
     serialized = json.loads(artifact_data)

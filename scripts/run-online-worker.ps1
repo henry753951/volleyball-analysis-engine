@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$CentralUrl = "ws://localhost:4000/api/v2/ai/providers/ws",
+    [string]$CentralUrl = "wss://volleyai.hsulab.net/api/v2/ai/providers/ws",
     [Parameter(Mandatory = $true)][string]$Token,
     [Alias("WorkerId")]
     [string]$InstanceKey = "analysis-worker-local",

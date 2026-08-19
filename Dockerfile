@@ -17,6 +17,7 @@ COPY --from=uv /uv /uvx /bin/
 WORKDIR /app
 
 FROM base AS dependencies
+ARG TORCH_EXTRA=cu130
 COPY --link pyproject.toml uv.lock README.md ./
 # `central` is a named build context pointing at the sibling
 # ../volleyball-monitoring-ai repository. The SDK's Hatch build includes these
@@ -27,7 +28,7 @@ COPY --from=central packages/contracts/flatbuffers/analysis-frame-chunk.fbs /vol
 COPY --from=central packages/contracts/flatbuffers/person-pose-evidence.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/person-pose-evidence.fbs
 COPY --from=central packages/contracts/fixtures/normal-rally/analysis-data-domain.json /volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/analysis-data-domain.json
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra cu130 --extra models \
+    uv sync --frozen --no-dev --extra ${TORCH_EXTRA} --extra models \
       --no-install-project --no-editable
 
 FROM base AS runtime

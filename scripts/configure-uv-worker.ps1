@@ -3,10 +3,10 @@ param(
     [Parameter(Mandatory = $true)][string]$ServerUrl,
     [Parameter(ParameterSetName = "ExistingToken")][string]$Token = $env:VOLLYAI_TOKEN,
     [Parameter(ParameterSetName = "LocalToken")][switch]$CreateLocalToken,
-    [string]$CentralHttpUrl = "http://localhost:10000",
+    [string]$CentralHttpUrl = "https://volleyai.hsulab.net",
     [string]$TokenName = "uv-analysis-worker",
     [string]$InstanceId = "$env:COMPUTERNAME-uv-analysis-worker",
-    [string]$AssetsRoot = (Join-Path $PSScriptRoot "..\.models"),
+    [string]$AssetsRoot,
     [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
     [ValidateSet("auto", "cpu", "cuda:0")][string]$Device = "auto",
     [switch]$WithReid,
@@ -15,6 +15,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+if ([string]::IsNullOrWhiteSpace($AssetsRoot)) { $AssetsRoot = Join-Path $projectRoot ".models" }
 $configPath = Join-Path $projectRoot ".env.worker"
 $assetsPath = [IO.Path]::GetFullPath($AssetsRoot)
 

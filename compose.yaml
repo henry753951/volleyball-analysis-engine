@@ -1,16 +1,20 @@
 services:
   analysis-worker:
+    image: ${VOLLYAI_WORKER_IMAGE:-volleyball-analysis-engine:local}
     build:
       context: .
       additional_contexts:
         central: ../volleyball-monitoring-ai
+      args:
+        TORCH_EXTRA: ${VOLLYAI_TORCH_BACKEND:-cu130}
     env_file:
       - path: .env
         required: false
     environment:
-      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v2/ai/providers/ws}
+      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-wss://volleyai.hsulab.net/api/v2/ai/providers/ws}
+      VOLLYAI_INSTANCE_ID: ${VOLLYAI_INSTANCE_ID:-analysis-worker-docker}
       VOLLYAI_WORKSPACE: /workspaces
-      VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cpu}
+      VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cuda:0}
       VOLLYAI_MULTITASK_SDK_ROOT: /models/volleyball-sdk
       VOLLYAI_MULTITASK_CHECKPOINT: /models/volleyball-sdk/best.pth
       VOLLYAI_MULTITASK_BATCH_SIZE: ${VOLLYAI_MULTITASK_BATCH_SIZE:-4}

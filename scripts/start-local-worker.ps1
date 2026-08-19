@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
-    [string]$CentralHttpUrl = "http://localhost:10000",
-    [string]$CentralWsUrl = "ws://localhost:10000/api/v2/ai/providers/ws",
+    [string]$CentralHttpUrl = "https://volleyai.hsulab.net",
+    [string]$CentralWsUrl = "wss://volleyai.hsulab.net/api/v2/ai/providers/ws",
     [string]$InstanceKey = "analysis-worker-rtx5070-provider-v2",
     [string]$TokenName = "local-rtx5070-provider-v2",
     [int]$ReIdEvery = 1,

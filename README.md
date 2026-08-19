@@ -1,6 +1,6 @@
 # volleyball-analysis-engine
 
-Headless `uv` project for running the external AI side of
+Docker-first worker for running the external AI side of
 `volleyball-monitoring-ai`. Online and offline modes use the same model pipeline:
 
 ```text
@@ -28,8 +28,8 @@ into left/right/unknown banks from projected court-side observations. Matching f
 calibrated `volley-reid` eligibility boundary: at least 12 detections at least 28 pixels tall, then
 the best-quality observation from each of four temporal bins is averaged into the exported
 prototype. Per-frame embeddings remain transient and are never written to the result. The bank
-also exports simultaneous-track cannot-links and the cached OSNet checkpoint SHA256 so a downstream
-match/roster identity service can consolidate clips without rewriting clip-local track IDs.
+also exports simultaneous-track cannot-links so a downstream match/roster identity service can
+consolidate clips without rewriting clip-local track IDs.
 
 ## Repository layout
 
@@ -144,28 +144,57 @@ clip hash, frame rate and time base still come from the validated job envelope.
 
 ## Online worker mode
 
-Copy `.env.example` to `.env` for persistent local values, or pass connection secrets to the
-PowerShell launcher:
-
-```powershell
-.\scripts\run-online-worker.ps1 `
-  -CentralUrl "ws://localhost:10000/api/v2/ai/providers/ws" `
-  -Token "vmai_replace-with-worker-access-token" `
-  -InstanceKey "analysis-worker-local"
-```
-
 Create or rotate the Worker Access Token from the central server operations console. The current
-protocol has no Integration ID: the bearer token authenticates the worker pool, while
-`InstanceKey` identifies this worker process. Port `10000` is the Docker Compose host mapping;
-use port `4000` when the central server itself runs directly on the host.
+protocol has no Integration ID: the bearer token authenticates the worker pool, while each Docker
+`VOLLYAI_INSTANCE_ID` identifies one worker replica. The Ubuntu Docker installer persists the
+token and connects to `wss://volleyai.hsulab.net/api/v2/ai/providers/ws`.
 
 The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
 
-The current portable installation path uses `uv`; it includes model download/verification, token
-configuration, Windows launch scripts, and Linux commands in
-[docs/UV_WORKER_INSTALL.md](docs/UV_WORKER_INSTALL.md).
+The supported deployment path is Ubuntu-first. The installer downloads this repository and the
+central repository as GitHub archives, so an operator does not need to run `git clone`. It also
+accepts direct model URLs, persists the WSS endpoint and token in a local protected environment
+file, and starts one Docker worker per selected GPU. See the deployment runbook:
+
+- [Ubuntu deployment](docs/UBUNTU_DEPLOY.md)
+
+## Ubuntu one-line installation and removal
+
+Docker with two GPUs and an existing worker token:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/install-ubuntu.sh \
+  | bash -s -- \
+      --mode docker \
+      --server-url https://volleyai.hsulab.net/ \
+      --token 'vmai_replace-with-worker-token' \
+      --multitask-sdk-url 'https://private.example.com/volleyball_inference_sdk.zip' \
+      --gpu-ids 0,1
+```
+
+The default server is `https://volleyai.hsulab.net/`, normalized to
+`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The public OSNet URL is embedded in the
+installer; the project-specific multitask SDK is private and therefore must be supplied as a real
+URL or local directory. No manifest URL or SHA argument is required. Use `--torch-backend cpu` for
+CPU-only Docker.
+
+Remove worker processes and containers while retaining source, token and model assets:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/uninstall-ubuntu.sh \
+  | bash -s -- --mode all
+```
+
+Only use `--purge-models --purge-docker-volumes --purge-docker-image --yes` when those local
+assets are intentionally disposable.
+
+Template links:
+
+- [Ubuntu installer](scripts/install-ubuntu.sh)
+- [Ubuntu uninstaller](scripts/uninstall-ubuntu.sh)
+- [combined Ubuntu Docker deployment and model guide](docs/UBUNTU_DEPLOY.md)
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.

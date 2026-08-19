@@ -170,15 +170,17 @@ curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-eng
       --mode docker \
       --server-url https://volleyai.hsulab.net/ \
       --token 'vmai_replace-with-worker-token' \
-      --multitask-sdk-url 'https://private.example.com/volleyball_inference_sdk.zip' \
+      --multitask-sdk-root /srv/vollyai/volleyball_inference_sdk \
+      --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
       --gpu-ids 0,1
 ```
 
 The default server is `https://volleyai.hsulab.net/`, normalized to
-`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The public OSNet URL is embedded in the
-installer; the project-specific multitask SDK is private and therefore must be supplied as a real
-URL or local directory. No manifest URL or SHA argument is required. Use `--torch-backend cpu` for
-CPU-only Docker.
+`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The command shows the concrete public OSNet
+URL. The project-specific multitask SDK code is private and must be mounted from a local
+directory; its `best.pth` can optionally be supplied with
+`--multitask-checkpoint-url https://<your-real-artifact-host>/best.pth`. No manifest URL or SHA
+argument is required. Use `--torch-backend cpu` for CPU-only Docker.
 
 Remove worker processes and containers while retaining source, token and model assets:
 

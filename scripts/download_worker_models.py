@@ -8,7 +8,6 @@ import tarfile
 import tempfile
 import urllib.parse
 import urllib.request
-import zipfile
 from pathlib import Path
 
 DINO_ARCHIVE_URL = "https://codeload.github.com/facebookresearch/dinov2/tar.gz/refs/heads/main"
@@ -102,31 +101,16 @@ def download_repository(archive_url: str, destination: Path, label: str) -> None
         shutil.rmtree(temporary_root, ignore_errors=True)
 
 
-def safe_extract_zip(archive: Path, destination: Path) -> None:
-    """Extract a zip while rejecting traversal outside the destination."""
-    destination.mkdir(parents=True, exist_ok=True)
-    root = destination.resolve()
-    with zipfile.ZipFile(archive) as bundle:
-        for member in bundle.infolist():
-            target = (destination / member.filename).resolve()
-            if root != target and root not in target.parents:
-                message = f"unsafe zip member: {member.filename}"
-                raise ValueError(message)
-        bundle.extractall(destination)  # noqa: S202
-
-
-def prepare_multitask_sdk(*, assets_root: Path, sdk_root: Path | None, sdk_url: str | None) -> Path:
-    """Resolve the private unified SDK from an existing directory or downloadable zip."""
+def prepare_multitask_sdk(
+    *, assets_root: Path, sdk_root: Path | None, checkpoint_url: str | None
+) -> Path:
+    """Resolve the private SDK and optionally download its checkpoint directly."""
     if sdk_root is not None:
         resolved = sdk_root.resolve()
-    elif sdk_url:
-        archive = assets_root / "downloads" / "volleyball_inference_sdk.zip"
-        download(sdk_url, archive, "Volleyball inference SDK archive")
-        resolved = assets_root / "volleyball_inference_sdk"
-        if not resolved.exists():
-            safe_extract_zip(archive, resolved)
     else:
         resolved = assets_root / "volleyball_inference_sdk"
+    if checkpoint_url:
+        download(checkpoint_url, resolved / "best.pth", "Volleyball multitask checkpoint")
     if not (resolved / "volleyball_sdk" / "__init__.py").is_file():
         nested = [path.parent.parent for path in resolved.glob("*/volleyball_sdk/__init__.py")]
         if len(nested) == 1:
@@ -143,7 +127,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets-root", type=Path, required=True)
     parser.add_argument("--multitask-sdk-root", type=Path)
-    parser.add_argument("--multitask-sdk-url")
+    parser.add_argument("--multitask-checkpoint-url")
     parser.add_argument("--osnet-url")
     parser.add_argument("--dino-url")
     parser.add_argument("--with-reid", action="store_true")
@@ -156,7 +140,7 @@ def main() -> None:
     multitask_root = prepare_multitask_sdk(
         assets_root=assets_root,
         sdk_root=args.multitask_sdk_root,
-        sdk_url=args.multitask_sdk_url,
+        checkpoint_url=args.multitask_checkpoint_url,
     )
 
     smp_root = assets_root / "selective-mask-propagation"

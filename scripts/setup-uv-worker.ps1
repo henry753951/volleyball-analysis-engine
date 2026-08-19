@@ -2,7 +2,7 @@
 param(
     [string]$AssetsRoot,
     [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
-    [string]$MultitaskSdkUrl = $env:VOLLYAI_MULTITASK_SDK_URL,
+    [string]$MultitaskCheckpointUrl = $env:VOLLYAI_MULTITASK_CHECKPOINT_URL,
     [string]$OsnetUrl = $env:VOLLYAI_OSNET_URL,
     [string]$DinoUrl = $env:VOLLYAI_DINO_URL,
     [ValidateSet("cu130", "cpu")][string]$TorchBackend = "cu130",
@@ -42,19 +42,13 @@ try {
         "--assets-root", $assetsPath
     )
     if ($MultitaskSdkRoot -and -not (Test-Path -LiteralPath $MultitaskSdkRoot -PathType Container)) {
-        if ($MultitaskSdkUrl) {
-            Write-Host "Configured multitask SDK directory is absent; using the dynamic model URL instead."
-            $MultitaskSdkRoot = $null
-        }
-        else {
-            throw "Multitask SDK directory is missing: $MultitaskSdkRoot"
-        }
+        throw "Multitask SDK directory is missing: $MultitaskSdkRoot"
     }
     if ($MultitaskSdkRoot) {
         $downloadArguments += @("--multitask-sdk-root", $MultitaskSdkRoot)
     }
-    if ($MultitaskSdkUrl) {
-        $downloadArguments += @("--multitask-sdk-url", $MultitaskSdkUrl)
+    if ($MultitaskCheckpointUrl) {
+        $downloadArguments += @("--multitask-checkpoint-url", $MultitaskCheckpointUrl)
     }
     if ($OsnetUrl) { $downloadArguments += @("--osnet-url", $OsnetUrl) }
     if ($DinoUrl) { $downloadArguments += @("--dino-url", $DinoUrl) }

@@ -5,9 +5,7 @@ set -euo pipefail
 # not Git checkouts, and then runs the local copy.
 REPO_OWNER="henry753951"
 ENGINE_REPO="volleyball-analysis-engine"
-CENTRAL_REPO="volleyball-monitoring-ai"
 ENGINE_ARCHIVE="https://github.com/${REPO_OWNER}/${ENGINE_REPO}/archive/refs/heads/main.tar.gz"
-CENTRAL_ARCHIVE="https://github.com/${REPO_OWNER}/${CENTRAL_REPO}/archive/refs/heads/main.tar.gz"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]:-}")" && pwd)"
 ORIGINAL_ARGS=("$@")
 
@@ -20,7 +18,7 @@ INSTALL_DIR="${VOLLYAI_ENGINE_DIR:-$HOME/volleyball-analysis-engine}"
 INSTANCE_PREFIX="analysis-worker"
 ASSETS_ROOT=""
 MULTITASK_SDK_ROOT="${VOLLYAI_MULTITASK_SDK_ROOT:-}"
-MULTITASK_SDK_URL="${VOLLYAI_MULTITASK_SDK_URL:-}"
+MULTITASK_CHECKPOINT_URL="${VOLLYAI_MULTITASK_CHECKPOINT_URL:-}"
 OSNET_URL="${VOLLYAI_OSNET_URL:-https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true}"
 TORCH_BACKEND="auto"
 GPU_IDS=()
@@ -39,7 +37,7 @@ Usage: install-ubuntu.sh [options]
   --token TOKEN                    Worker access token
   --create-local-token             Create a development token through the token API
   --multitask-sdk-root PATH        Existing private SDK directory
-  --multitask-sdk-url URL          Private SDK zip URL
+  --multitask-checkpoint-url URL   Direct URL for private best.pth
   --osnet-url URL                  Sports OSNet checkpoint URL
   --gpu-ids 0,1                    Explicit physical GPU IDs
   --gpu-id 2                       Add one physical GPU ID
@@ -61,7 +59,7 @@ while (($#)); do
     --instance-prefix) INSTANCE_PREFIX="$2"; shift 2 ;;
     --assets-root) ASSETS_ROOT="$2"; shift 2 ;;
     --multitask-sdk-root) MULTITASK_SDK_ROOT="$2"; shift 2 ;;
-    --multitask-sdk-url) MULTITASK_SDK_URL="$2"; shift 2 ;;
+    --multitask-checkpoint-url) MULTITASK_CHECKPOINT_URL="$2"; shift 2 ;;
     --osnet-url) OSNET_URL="$2"; shift 2 ;;
     --torch-backend) TORCH_BACKEND="$2"; shift 2 ;;
     --gpu-ids) IFS=',' read -r -a GPU_IDS <<<"$2"; shift 2 ;;
@@ -105,18 +103,6 @@ PROJECT_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 if [[ -z "$ASSETS_ROOT" ]]; then ASSETS_ROOT="$PROJECT_ROOT/.models"; fi
 if [[ "$ASSETS_ROOT" != /* ]]; then ASSETS_ROOT="$PROJECT_ROOT/$ASSETS_ROOT"; fi
 ASSETS_ROOT="$(realpath -m "$ASSETS_ROOT")"
-CENTRAL_ROOT="$(cd -- "$PROJECT_ROOT/.." && pwd)/$CENTRAL_REPO"
-
-if [[ ! -f "$CENTRAL_ROOT/sdk/pyproject.toml" ]]; then
-  mkdir -p "$CENTRAL_ROOT"
-  TMP_CENTRAL="$(mktemp -d)"
-  trap 'rm -rf "$TMP_CENTRAL"' EXIT
-  curl -fsSL "$CENTRAL_ARCHIVE" | tar -xzf - -C "$TMP_CENTRAL"
-  CENTRAL_SOURCE="$(find "$TMP_CENTRAL" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-  [[ -n "$CENTRAL_SOURCE" ]] || die 'unable to unpack the central repository archive'
-  cp -a "$CENTRAL_SOURCE/." "$CENTRAL_ROOT/"
-fi
-
 cd "$PROJECT_ROOT"
 if [[ "$TORCH_BACKEND" == auto ]]; then
   if command -v nvidia-smi >/dev/null 2>&1; then
@@ -156,7 +142,7 @@ fi
 if ((SKIP_MODEL_DOWNLOAD == 0)); then
   DOWNLOAD_ARGS=(scripts/download_worker_models.py --assets-root "$ASSETS_ROOT" --osnet-url "$OSNET_URL")
   [[ -n "$MULTITASK_SDK_ROOT" ]] && DOWNLOAD_ARGS+=(--multitask-sdk-root "$MULTITASK_SDK_ROOT")
-  [[ -n "$MULTITASK_SDK_URL" ]] && DOWNLOAD_ARGS+=(--multitask-sdk-url "$MULTITASK_SDK_URL")
+  [[ -n "$MULTITASK_CHECKPOINT_URL" ]] && DOWNLOAD_ARGS+=(--multitask-checkpoint-url "$MULTITASK_CHECKPOINT_URL")
   python3 "${DOWNLOAD_ARGS[@]}"
 fi
 

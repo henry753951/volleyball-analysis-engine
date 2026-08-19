@@ -18,15 +18,13 @@ WORKDIR /app
 
 FROM base AS dependencies
 ARG TORCH_EXTRA=cu130
+ARG CENTRAL_REPOSITORY=https://github.com/henry753951/volleyball-monitoring-ai.git
+ARG CENTRAL_REF=main
 COPY --link pyproject.toml uv.lock README.md ./
-# `central` is a named build context pointing at the sibling
-# ../volleyball-monitoring-ai repository. The SDK's Hatch build includes these
-# contract assets, so preserve the central repository's relative layout.
-COPY --from=central sdk /volleyball-monitoring-ai/sdk
-COPY --from=central packages/contracts/flatbuffers/analysis-data.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/analysis-data.fbs
-COPY --from=central packages/contracts/flatbuffers/analysis-frame-chunk.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/analysis-frame-chunk.fbs
-COPY --from=central packages/contracts/flatbuffers/person-pose-evidence.fbs /volleyball-monitoring-ai/packages/contracts/flatbuffers/person-pose-evidence.fbs
-COPY --from=central packages/contracts/fixtures/normal-rally/analysis-data-domain.json /volleyball-monitoring-ai/packages/contracts/fixtures/normal-rally/analysis-data-domain.json
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends git ca-certificates \
+    && git clone --depth 1 --branch "${CENTRAL_REF}" "${CENTRAL_REPOSITORY}" /volleyball-monitoring-ai \
+    && rm -rf /var/lib/apt/lists/* /volleyball-monitoring-ai/.git
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --extra ${TORCH_EXTRA} --extra models \
       --no-install-project --no-editable

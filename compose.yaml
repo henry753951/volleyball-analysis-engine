@@ -3,10 +3,10 @@ services:
     image: ${VOLLYAI_WORKER_IMAGE:-volleyball-analysis-engine:local}
     build:
       context: .
-      additional_contexts:
-        central: ../volleyball-monitoring-ai
       args:
         TORCH_EXTRA: ${VOLLYAI_TORCH_BACKEND:-cu130}
+        CENTRAL_REPOSITORY: ${VOLLYAI_CENTRAL_REPOSITORY:-https://github.com/henry753951/volleyball-monitoring-ai.git}
+        CENTRAL_REF: ${VOLLYAI_CENTRAL_REF:-main}
     env_file:
       - path: .env
         required: false

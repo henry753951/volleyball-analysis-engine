@@ -8,7 +8,7 @@ param(
     [string]$InstancePrefix = "analysis-worker",
     [string]$AssetsRoot,
     [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
-    [string]$MultitaskSdkUrl = $env:VOLLYAI_MULTITASK_SDK_URL,
+    [string]$MultitaskCheckpointUrl = $env:VOLLYAI_MULTITASK_CHECKPOINT_URL,
     [string]$OsnetUrl = $env:VOLLYAI_OSNET_URL,
     [string]$DinoUrl = $env:VOLLYAI_DINO_URL,
     [ValidateSet("auto", "cu130", "cpu")][string]$TorchBackend = "auto",
@@ -139,7 +139,7 @@ if (-not $SkipModelDownload) {
         TorchBackend = $TorchBackend
     }
     if ($MultitaskSdkRoot) { $setupParameters.MultitaskSdkRoot = $MultitaskSdkRoot }
-    if ($MultitaskSdkUrl) { $setupParameters.MultitaskSdkUrl = $MultitaskSdkUrl }
+    if ($MultitaskCheckpointUrl) { $setupParameters.MultitaskCheckpointUrl = $MultitaskCheckpointUrl }
     if ($OsnetUrl) { $setupParameters.OsnetUrl = $OsnetUrl }
     if ($DinoUrl) { $setupParameters.DinoUrl = $DinoUrl }
     if ($WithReid) { $setupParameters.WithReid = $true }

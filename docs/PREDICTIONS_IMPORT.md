@@ -37,7 +37,7 @@ python scripts/import_predictions.py all \
   --capture-session-id 05d989a7-03ce-48a2-a450-006f2dc740a4 \
   --server-http https://volleyai.hsulab.net \
   --annotation-ws wss://volleyai.hsulab.net/ws/annotations \
-  --server-ws wss://volleyai.hsulab.net/api/v2/ai/providers/ws \
+  --server-ws 'wss://volleyai.hsulab.net/api/v2/ai/providers/ws?match_id=1322399f-91fa-42c8-92b2-683067101f3b' \
   --workspace /work/import/worker
 ```
 
@@ -57,7 +57,7 @@ python scripts/import_predictions.py all \
 ```bash
 python scripts/import_predictions.py worker \
   --plan /work/import/plan.json \
-  --server-ws wss://volleyai.hsulab.net/api/v2/ai/providers/ws \
+  --server-ws 'wss://volleyai.hsulab.net/api/v2/ai/providers/ws?match_id=1322399f-91fa-42c8-92b2-683067101f3b' \
   --workspace /work/import/worker
 
 python scripts/import_predictions.py submit \
@@ -67,6 +67,30 @@ python scripts/import_predictions.py submit \
   --server-http https://volleyai.hsulab.net \
   --annotation-ws wss://volleyai.hsulab.net/ws/annotations
 ```
+
+`match_id` WebSocket scope 很重要：這個 predictions worker 只會收到該場賽事的
+`ANALYSIS` 工作，不會租用或拒絕其他場次原本排隊中的工作。
+
+## 3. 重新產生既有匯入場次的球路
+
+若場次已經匯入，但要用目前的 worker function 重新產生擊球時間、球種與球路，
+可建立新的版本化 `AnalysisRun`。這不會改寫既有 `RallySubmission`、人工標記或快捷鍵流程：
+
+```bash
+export VOLLYAI_USER_TOKEN='正式環境的使用者 Token（本機 DEV_AUTH 可省略）'
+
+python scripts/reprocess_predictions.py \
+  --plan /work/import/plan.json \
+  --match-id 1322399f-91fa-42c8-92b2-683067101f3b \
+  --server-http https://volleyai.hsulab.net \
+  --server-ws wss://volleyai.hsulab.net/api/v2/ai/providers/ws \
+  --workspace /work/import/reprocess \
+  --worker-count 4
+```
+
+若沒有設定 `VOLLYAI_TOKEN`，腳本會透過 operations API 建立暫時 AI Worker Token，
+完成或失敗後都會自動刪除。`--match-id` 會自動加入 WebSocket URL，限制 Worker
+只接收這一場的工作；多個 Worker 只提高同場的平行處理量，不會碰其他場次。
 
 ## 匯入限制
 

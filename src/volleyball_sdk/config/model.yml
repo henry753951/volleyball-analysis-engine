@@ -1,0 +1,134 @@
+# Inference-only architecture config for the Court60 multitask checkpoint.
+# No data paths, optimizer, losses, augmentation, evaluator, or training state.
+
+model: RTv4
+postprocessor: PostProcessor
+
+num_classes: 3
+num_actions: 9
+num_group_classes: 9
+use_focal_loss: true
+eval_spatial_size: [576, 1024]
+
+runtime:
+  frame_num: 5
+  jump_frame: 2
+  sampling_mode: centered
+  input_size: [576, 1024]       # [height, width]
+  normalize_mean: [0.45, 0.45, 0.45]
+  normalize_std: [0.225, 0.225, 0.225]
+  score_threshold: 0.40
+
+RTv4:
+  backbone: X3DBackbone
+  temporal_fusion: TemporalPyramidFusion
+  encoder: HybridEncoder
+  decoder: DFINETransformer
+
+X3DBackbone:
+  feat_strides: [4, 8, 16]
+  model_name: x3d_xs
+  pretrained: false
+  checkpoint: ~
+  freeze_bn: true
+  expected_channels: [24, 48, 96]
+
+TemporalPyramidFusion:
+  in_channels: [24, 48, 96]
+  temporal_stride: 2.0
+  temporal_kernel_size: 3
+  norm_groups: 8
+  dropout: 0.0
+  use_motion_branch: true
+  use_temporal_position: true
+  max_temporal_stride: 8.0
+  attention_temperature: 1.0
+  center_mode: middle
+  residual_scale_init: 0.10
+
+HybridEncoder:
+  in_channels: [24, 48, 96]
+  feat_strides: [4, 8, 16]
+  hidden_dim: 384
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 2048
+  dropout: 0.0
+  enc_act: gelu
+  expansion: 1.0
+  depth_mult: 1.0
+  act: silu
+  version: dfine
+
+DFINETransformer:
+  feat_channels: [384, 384, 384]
+  feat_strides: [4, 8, 16]
+  hidden_dim: 384
+  num_queries: 300
+  num_levels: 3
+  num_points: [3, 6, 3]
+  nhead: 8
+  num_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.0
+  activation: silu
+  mlp_act: silu
+  eval_idx: -1
+  aux_loss: true
+  num_denoising: 100
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  learn_query_content: false
+  cross_attn_method: default
+  query_select_method: default
+  reg_max: 32
+  reg_scale: 8
+  layer_scale: 1
+  num_human_keypoints: 17
+  num_court_keypoints: 60
+  multitask_head: QueryMultitaskHead
+  semantic_aux_layers: 2
+  semantic_aux_refine_pose: false
+
+QueryMultitaskHead:
+  hidden_dim: 384
+  feature_channels: 384
+  num_human_keypoints: 17
+  num_court_keypoints: 60
+  action_hidden_dim: 256
+  group_hidden_dim: 256
+  pose_hidden_dim: 256
+  pose_feature_dim: 96
+  pose_refine_level: 0
+  pose_refinement: true
+  human_refinement_scale: 0.15
+  dropout: 0.05
+  actionness_prior: 0.01
+  human_visibility_prior: 0.80
+  court_center_feature_channels: 24
+  court_evidence_dim: 32
+  court_refine_dim: 96
+  court_heatmap_temperature: 0.35
+  court_refinement_scale: 0.025
+  court_anchor_support_center: 2.5
+  court_anchor_support_temperature: 0.5
+  court_anchor_spread_scale: 0.020
+  court_geometry_score_scale: 0.035
+  court_homography_ridge: 0.01
+  court_homography_prior_strength: 1.0
+  court_projection_denominator_floor: 0.02
+  court_projection_margin: 2.0
+  group_attention_temperature: 1.0
+  detach_group_person_prior: true
+
+PostProcessor:
+  num_top_queries: 300
+  group_person_score_threshold: 0.25
+  group_max_person_queries: 18
+  human_pose_ap_topk: 20
+  court_pose_ap_topk: 1
+  pose_pck_threshold: 0.05
+  pose_pcp_threshold: 0.50
+  court_pose_conf_threshold: 0.35
+  court_detection_conf_threshold: 0.15

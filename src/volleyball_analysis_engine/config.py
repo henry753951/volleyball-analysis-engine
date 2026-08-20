@@ -28,8 +28,8 @@ class Settings(BaseSettings):
     device: str = "cuda:0"
     detector_threshold: float = Field(default=0.4, ge=0.0, le=1.0)
     reid_every: int = Field(default=1, ge=1, le=30)
-    multitask_sdk_root: Path = Path("E:/User/Downloads/volleyball_inference_sdk")
-    multitask_checkpoint: Path = Path("E:/User/Downloads/volleyball_inference_sdk/best.pth")
+    multitask_sdk_root: Path = Path("src")
+    multitask_checkpoint: Path = Path(".models/volleyball_multitask/best.pth")
     multitask_config: Path | None = None
     multitask_batch_size: int = Field(default=4, ge=1, le=64)
     multitask_fp16: bool = True

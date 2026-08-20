@@ -1,0 +1,10 @@
+services:
+  analysis-worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids:
+                - "${VOLLYAI_GPU_ID:-0}"
+              capabilities: [gpu]

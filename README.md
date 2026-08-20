@@ -1,6 +1,6 @@
 # volleyball-analysis-engine
 
-Headless `uv` project for running the external AI side of
+Docker-first worker for running the external AI side of
 `volleyball-monitoring-ai`. Online and offline modes use the same model pipeline:
 
 ```text
@@ -28,23 +28,25 @@ into left/right/unknown banks from projected court-side observations. Matching f
 calibrated `volley-reid` eligibility boundary: at least 12 detections at least 28 pixels tall, then
 the best-quality observation from each of four temporal bins is averaged into the exported
 prototype. Per-frame embeddings remain transient and are never written to the result. The bank
-also exports simultaneous-track cannot-links and the cached OSNet checkpoint SHA256 so a downstream
-match/roster identity service can consolidate clips without rewriting clip-local track IDs.
+also exports simultaneous-track cannot-links so a downstream match/roster identity service can
+consolidate clips without rewriting clip-local track IDs.
 
 ## Repository layout
 
-Keep the central and AI repositories as siblings. The SDK is installed from the sibling path; it is
-not vendored or used as a subrepository.
+The worker repository contains the inference SDK directly under `src/volleyball_sdk/`; the Docker
+image packages that code directly. The multitask checkpoint is downloaded from a Hugging Face file
+URL into `.models/volleyball_multitask/`. The central repository remains a build-time dependency
+and is cloned inside Docker, so an operator does not need sibling checkouts.
 
 ```text
 H:\Repos\
 ├── volleyball-monitoring-ai\
-├── volleyball-analysis-engine\
-└── volley-ai\
+└── volleyball-analysis-engine\
 ```
 
-The inference SDK and checkpoint remain external trusted assets and are selected with
-`VOLLYAI_MULTITASK_SDK_ROOT` and `VOLLYAI_MULTITASK_CHECKPOINT`; weights are never committed.
+The bundled SDK is loaded from `src/volleyball_sdk` during local runs and copied to `/app/src` in
+the Docker image. `best.pth` is the only private model asset supplied by URL and is mounted at
+`/models/volleyball_multitask/best.pth`.
 
 ### Local ID tracking and selective SAM3
 
@@ -67,10 +69,9 @@ The defaults point at the assets supplied for this project:
 .\scripts\setup-dev.ps1
 ```
 
-This validates `E:\User\Downloads\volleyball_inference_sdk` and its `best.pth`, installs CUDA 13.0
+This validates the bundled `src\volleyball_sdk` and the downloaded `.models\volleyball_multitask\best.pth`, installs CUDA 13.0
 PyTorch and model dependencies with `uv`, then strictly loads and warms the multitask model plus
-the retained OSNet tracking encoder. Use `-MultitaskSdkRoot` for another asset location or
-`-TorchBackend cpu` for CPU-only setup.
+the retained OSNet tracking encoder. Use `-TorchBackend cpu` for CPU-only setup.
 
 The SDK samples five-frame centered clips with its configured temporal spacing and emits one result
 for every target frame. Court60 uses ten semantic anchors plus fifty deterministic edge samples;
@@ -144,28 +145,59 @@ clip hash, frame rate and time base still come from the validated job envelope.
 
 ## Online worker mode
 
-Copy `.env.example` to `.env` for persistent local values, or pass connection secrets to the
-PowerShell launcher:
-
-```powershell
-.\scripts\run-online-worker.ps1 `
-  -CentralUrl "ws://localhost:10000/api/v2/ai/providers/ws" `
-  -Token "vmai_replace-with-worker-access-token" `
-  -InstanceKey "analysis-worker-local"
-```
-
 Create or rotate the Worker Access Token from the central server operations console. The current
-protocol has no Integration ID: the bearer token authenticates the worker pool, while
-`InstanceKey` identifies this worker process. Port `10000` is the Docker Compose host mapping;
-use port `4000` when the central server itself runs directly on the host.
+protocol has no Integration ID: the bearer token authenticates the worker pool, while each Docker
+`VOLLYAI_INSTANCE_ID` identifies one worker replica. The Ubuntu Docker installer persists the
+token and connects to `wss://volleyai.hsulab.net/api/v2/ai/providers/ws`.
 
 The worker makes one outbound WebSocket connection, advertises current load, accepts a leased job,
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
 
-The current portable installation path uses `uv`; it includes model download/verification, token
-configuration, Windows launch scripts, and Linux commands in
-[docs/UV_WORKER_INSTALL.md](docs/UV_WORKER_INSTALL.md).
+The supported deployment path is Ubuntu-first. The installer downloads the bootstrap archive and
+public model assets, while the Docker build hydrates the bundled SDK/checkpoint and clones the
+central repository internally. It persists the WSS endpoint and token in a local protected
+environment file and starts one Docker worker per selected GPU. See the deployment runbook:
+
+- [Ubuntu deployment](docs/UBUNTU_DEPLOY.md)
+
+## Ubuntu one-line installation and removal
+
+Docker with two GPUs and an existing worker token:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/install-ubuntu.sh \
+  | bash -s -- \
+      --mode docker \
+      --server-url 'wss://volleyai.hsulab.net/api/v2/ai/providers/ws' \
+      --token 'vmai_replace-with-worker-token' \
+      --multitask-checkpoint-url 'https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true' \
+      --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
+      --gpu-ids 0,1
+```
+
+The recommended `--server-url` value is the complete WebSocket endpoint:
+`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The installer also accepts the base URL
+`https://volleyai.hsulab.net/` and normalizes it to the same endpoint. The command includes the
+project's Hugging Face resolve URL for `best.pth` and the concrete public OSNet URL. The SDK code
+is bundled in the repository, so no SDK path, manifest URL or SHA argument is required. Use
+`--torch-backend cpu` for CPU-only Docker.
+
+Remove worker processes and containers while retaining source, token and model assets:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/uninstall-ubuntu.sh \
+  | bash -s -- --mode all
+```
+
+Only use `--purge-models --purge-docker-volumes --purge-docker-image --yes` when those local
+assets are intentionally disposable.
+
+Template links:
+
+- [Ubuntu installer](scripts/install-ubuntu.sh)
+- [Ubuntu uninstaller](scripts/uninstall-ubuntu.sh)
+- [combined Ubuntu Docker deployment and model guide](docs/UBUNTU_DEPLOY.md)
 
 Models are prewarmed before the worker advertises readiness. Production jobs skip heavy developer
 preview rendering by default; download, analysis, and completion durations are logged separately.

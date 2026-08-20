@@ -1,18 +1,22 @@
 services:
   analysis-worker:
+    image: ${VOLLYAI_WORKER_IMAGE:-volleyball-analysis-engine:local}
     build:
       context: .
-      additional_contexts:
-        central: ../volleyball-monitoring-ai
+      args:
+        TORCH_EXTRA: ${VOLLYAI_TORCH_BACKEND:-cu130}
+        CENTRAL_REPOSITORY: ${VOLLYAI_CENTRAL_REPOSITORY:-https://github.com/henry753951/volleyball-monitoring-ai.git}
+        CENTRAL_REF: ${VOLLYAI_CENTRAL_REF:-main}
     env_file:
       - path: .env
         required: false
     environment:
-      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-ws://host.docker.internal:4000/api/v2/ai/providers/ws}
+      VOLLYAI_SERVER_WS_URL: ${VOLLYAI_SERVER_WS_URL:-wss://volleyai.hsulab.net/api/v2/ai/providers/ws}
+      VOLLYAI_INSTANCE_ID: ${VOLLYAI_INSTANCE_ID:-analysis-worker-docker}
       VOLLYAI_WORKSPACE: /workspaces
-      VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cpu}
-      VOLLYAI_MULTITASK_SDK_ROOT: /models/volleyball-sdk
-      VOLLYAI_MULTITASK_CHECKPOINT: /models/volleyball-sdk/best.pth
+      VOLLYAI_DEVICE: ${VOLLYAI_DEVICE:-cuda:0}
+      VOLLYAI_MULTITASK_SDK_ROOT: /app/src
+      VOLLYAI_MULTITASK_CHECKPOINT: /models/volleyball_multitask/best.pth
       VOLLYAI_MULTITASK_BATCH_SIZE: ${VOLLYAI_MULTITASK_BATCH_SIZE:-4}
       VOLLYAI_MULTITASK_FP16: ${VOLLYAI_MULTITASK_FP16:-true}
       VOLLYAI_MULTITASK_WARMUP: ${VOLLYAI_MULTITASK_WARMUP:-true}
@@ -27,11 +31,10 @@ services:
       VOLLYAI_IDENTITY_PREVIEW_ENABLED: ${VOLLYAI_IDENTITY_PREVIEW_ENABLED:-true}
       VOLLYAI_PREWARM_MODELS: ${VOLLYAI_PREWARM_MODELS:-true}
       VOLLYAI_WRITE_DEBUG_ARTIFACTS: ${VOLLYAI_WRITE_DEBUG_ARTIFACTS:-false}
-      VOLLYAI_SMP_ROOT: /models/smp
-      VOLLYAI_OSNET_CHECKPOINT: /models/smp/selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60
+      VOLLYAI_SMP_ROOT: /models/selective-mask-propagation
+      VOLLYAI_OSNET_CHECKPOINT: /models/selective-mask-propagation/selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60
     volumes:
-      - ${VOLLYAI_MULTITASK_SDK_HOST_ROOT:?Set VOLLYAI_MULTITASK_SDK_HOST_ROOT to volleyball_inference_sdk}:/models/volleyball-sdk:ro
-      - ${VOLLYAI_SMP_HOST_ROOT:?Set VOLLYAI_SMP_HOST_ROOT}:/models/smp:ro
+      - ${VOLLYAI_MODELS_HOST_ROOT:?Set VOLLYAI_MODELS_HOST_ROOT to the downloaded model directory}:/models:ro
       - analysis-workspaces:/workspaces
       - model-cache:/home/worker/.cache
     restart: unless-stopped

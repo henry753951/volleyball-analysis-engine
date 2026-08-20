@@ -658,7 +658,7 @@ def _candidate_semantic(candidate: ContactPhaseCandidate) -> dict[str, str]:
 
 def _build_contact_events(
     *,
-    job: AIJobRequest,
+    job: Any,
     phase_candidates: list[ContactPhaseCandidate],
     proposals: list[ContactProposal],
     balls: dict[int, BallObservation],
@@ -700,7 +700,7 @@ def _build_contact_events(
                 actions=actions,
                 action_radius=action_radius,
             )
-            representative = AnalysisPipeline._representative_position(
+            representative = cast("Any", AnalysisPipeline)._representative_position(
                 association.player,
                 association.ball,
                 association.observation_frame,
@@ -820,7 +820,7 @@ def _build_contact_events(
             actions=actions,
             action_radius=action_radius,
         )
-        representative = AnalysisPipeline._representative_position(
+        representative = cast("Any", AnalysisPipeline)._representative_position(
             association.player,
             association.ball,
             association.observation_frame,
@@ -1154,7 +1154,7 @@ def convert_segment(
         frame_width=index.metadata.width,
         frame_height=index.metadata.height,
     )
-    path_segments = AnalysisPipeline._build_paths(contact_events)
+    path_segments = cast("Any", AnalysisPipeline)._build_paths(contact_events)
     analysis_id = f"predictions-import:{job.ai_job_id}"
     domain = AnalysisDomainData.model_validate(
         {

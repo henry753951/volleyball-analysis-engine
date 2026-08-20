@@ -14,9 +14,9 @@ from volleyball_analysis_engine.predictions_import import (
     ContactPhaseCandidate,
     PredictionIndex,
     SourceMetadata,
-    _build_contact_events,
-    _candidate_semantic,
-    _contact_phase_candidates,
+    _build_contact_events,  # pyright: ignore[reportPrivateUsage]
+    _candidate_semantic,  # pyright: ignore[reportPrivateUsage]
+    _contact_phase_candidates,  # pyright: ignore[reportPrivateUsage]
     build_prediction_index,
     create_plan,
     detect_segments,

@@ -38,17 +38,17 @@ internally. No repository checkout is required on the host.
 curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/install-ubuntu.sh \
   | bash -s -- \
       --mode docker \
-      --server-url https://volleyai.hsulab.net/ \
+      --server-url 'wss://volleyai.hsulab.net/api/v2/ai/providers/ws' \
       --token 'vmai_replace-with-worker-token' \
       --multitask-checkpoint-url 'https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true' \
       --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
       --gpu-ids 0,1
 ```
 
-The `--server-url` value may be a base `https://`/`http://` URL or a complete `wss://`/`ws://`
-URL. The default is `https://volleyai.hsulab.net/`, normalized to
-`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The token is written only to the local `.env`
-with restrictive permissions and is passed to the outbound worker connection.
+The recommended `--server-url` value is the complete WebSocket endpoint:
+`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The installer also accepts the base
+`https://volleyai.hsulab.net/` URL and normalizes it to the same endpoint. The token is written only
+to the local `.env` with restrictive permissions and is passed to the outbound worker connection.
 
 The command includes the project's Hugging Face resolve URL for `best.pth`. The SDK itself is already
 in `src/volleyball_sdk/`; the

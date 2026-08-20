@@ -169,18 +169,19 @@ Docker with two GPUs and an existing worker token:
 curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/install-ubuntu.sh \
   | bash -s -- \
       --mode docker \
-      --server-url https://volleyai.hsulab.net/ \
+      --server-url 'wss://volleyai.hsulab.net/api/v2/ai/providers/ws' \
       --token 'vmai_replace-with-worker-token' \
       --multitask-checkpoint-url 'https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true' \
       --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
       --gpu-ids 0,1
 ```
 
-The command includes the project's Hugging Face resolve URL for `best.pth`. The default server is
-`https://volleyai.hsulab.net/`, normalized to
-`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The command shows the concrete public OSNet
-URL. The SDK code is bundled in the repository, so only the `best.pth` URL is needed; no SDK path,
-manifest URL or SHA argument is required. Use `--torch-backend cpu` for CPU-only Docker.
+The recommended `--server-url` value is the complete WebSocket endpoint:
+`wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The installer also accepts the base URL
+`https://volleyai.hsulab.net/` and normalizes it to the same endpoint. The command includes the
+project's Hugging Face resolve URL for `best.pth` and the concrete public OSNet URL. The SDK code
+is bundled in the repository, so no SDK path, manifest URL or SHA argument is required. Use
+`--torch-backend cpu` for CPU-only Docker.
 
 Remove worker processes and containers while retaining source, token and model assets:
 

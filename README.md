@@ -33,18 +33,20 @@ consolidate clips without rewriting clip-local track IDs.
 
 ## Repository layout
 
-Keep the central and AI repositories as siblings. The SDK is installed from the sibling path; it is
-not vendored or used as a subrepository.
+The worker repository contains the inference SDK directly under `src/volleyball_sdk/`; the Docker
+image packages that code directly. The multitask checkpoint is downloaded from a Hugging Face file
+URL into `.models/volleyball_multitask/`. The central repository remains a build-time dependency
+and is cloned inside Docker, so an operator does not need sibling checkouts.
 
 ```text
 H:\Repos\
 ├── volleyball-monitoring-ai\
-├── volleyball-analysis-engine\
-└── volley-ai\
+└── volleyball-analysis-engine\
 ```
 
-The inference SDK and checkpoint remain external trusted assets and are selected with
-`VOLLYAI_MULTITASK_SDK_ROOT` and `VOLLYAI_MULTITASK_CHECKPOINT`; weights are never committed.
+The bundled SDK is loaded from `src/volleyball_sdk` during local runs and copied to `/app/src` in
+the Docker image. `best.pth` is the only private model asset supplied by URL and is mounted at
+`/models/volleyball_multitask/best.pth`.
 
 ### Local ID tracking and selective SAM3
 
@@ -67,10 +69,9 @@ The defaults point at the assets supplied for this project:
 .\scripts\setup-dev.ps1
 ```
 
-This validates `E:\User\Downloads\volleyball_inference_sdk` and its `best.pth`, installs CUDA 13.0
+This validates the bundled `src\volleyball_sdk` and the downloaded `.models\volleyball_multitask\best.pth`, installs CUDA 13.0
 PyTorch and model dependencies with `uv`, then strictly loads and warms the multitask model plus
-the retained OSNet tracking encoder. Use `-MultitaskSdkRoot` for another asset location or
-`-TorchBackend cpu` for CPU-only setup.
+the retained OSNet tracking encoder. Use `-TorchBackend cpu` for CPU-only setup.
 
 The SDK samples five-frame centered clips with its configured temporal spacing and emits one result
 for every target frame. Court60 uses ten semantic anchors plus fifty deterministic edge samples;
@@ -153,10 +154,10 @@ The worker makes one outbound WebSocket connection, advertises current load, acc
 downloads and verifies its canonical clip, runs the shared pipeline, reports progress and sends the
 typed result through the authenticated callback.
 
-The supported deployment path is Ubuntu-first. The installer downloads this repository and the
-central repository as GitHub archives, so an operator does not need to run `git clone`. It also
-accepts direct model URLs, persists the WSS endpoint and token in a local protected environment
-file, and starts one Docker worker per selected GPU. See the deployment runbook:
+The supported deployment path is Ubuntu-first. The installer downloads the bootstrap archive and
+public model assets, while the Docker build hydrates the bundled SDK/checkpoint and clones the
+central repository internally. It persists the WSS endpoint and token in a local protected
+environment file and starts one Docker worker per selected GPU. See the deployment runbook:
 
 - [Ubuntu deployment](docs/UBUNTU_DEPLOY.md)
 
@@ -170,17 +171,16 @@ curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-eng
       --mode docker \
       --server-url https://volleyai.hsulab.net/ \
       --token 'vmai_replace-with-worker-token' \
-      --multitask-sdk-root /srv/vollyai/volleyball_inference_sdk \
+      --multitask-checkpoint-url 'https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true' \
       --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
       --gpu-ids 0,1
 ```
 
-The default server is `https://volleyai.hsulab.net/`, normalized to
+The command includes the project's Hugging Face resolve URL for `best.pth`. The default server is
+`https://volleyai.hsulab.net/`, normalized to
 `wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The command shows the concrete public OSNet
-URL. The project-specific multitask SDK code is private and must be mounted from a local
-directory; its `best.pth` can optionally be supplied with
-`--multitask-checkpoint-url https://<your-real-artifact-host>/best.pth`. No manifest URL or SHA
-argument is required. Use `--torch-backend cpu` for CPU-only Docker.
+URL. The SDK code is bundled in the repository, so only the `best.pth` URL is needed; no SDK path,
+manifest URL or SHA argument is required. Use `--torch-backend cpu` for CPU-only Docker.
 
 Remove worker processes and containers while retaining source, token and model assets:
 

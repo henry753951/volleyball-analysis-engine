@@ -1,8 +1,9 @@
-"""Download and validate external worker source trees and checkpoints."""
+"""Download public worker model assets and validate the bundled multitask SDK."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import tarfile
 import tempfile
@@ -102,32 +103,27 @@ def download_repository(archive_url: str, destination: Path, label: str) -> None
 
 
 def prepare_multitask_sdk(
-    *, assets_root: Path, sdk_root: Path | None, checkpoint_url: str | None
-) -> Path:
-    """Resolve the private SDK and optionally download its checkpoint directly."""
-    if sdk_root is not None:
-        resolved = sdk_root.resolve()
-    else:
-        resolved = assets_root / "volleyball_inference_sdk"
-    if checkpoint_url:
-        download(checkpoint_url, resolved / "best.pth", "Volleyball multitask checkpoint")
-    if not (resolved / "volleyball_sdk" / "__init__.py").is_file():
-        nested = [path.parent.parent for path in resolved.glob("*/volleyball_sdk/__init__.py")]
-        if len(nested) == 1:
-            resolved = nested[0]
-    validate_file(resolved / "best.pth", "Volleyball multitask checkpoint")
-    if not (resolved / "volleyball_sdk" / "__init__.py").is_file():
-        message = f"Volleyball SDK package is missing: {resolved / 'volleyball_sdk'}"
+    *, project_root: Path, assets_root: Path, checkpoint_url: str | None
+) -> tuple[Path, Path]:
+    """Resolve the bundled SDK and download its checkpoint into the model cache."""
+    sdk_root = project_root / "src"
+    if not (sdk_root / "volleyball_sdk" / "__init__.py").is_file():
+        message = f"bundled Volleyball SDK package is missing: {sdk_root / 'volleyball_sdk'}"
         raise FileNotFoundError(message)
-    return resolved
+    checkpoint = assets_root / "volleyball_multitask" / "best.pth"
+    if checkpoint_url:
+        download(checkpoint_url, checkpoint, "Volleyball multitask checkpoint")
+    validate_file(checkpoint, "Volleyball multitask checkpoint")
+    return sdk_root, checkpoint
 
 
 def main() -> None:
     """Prepare the base models and optional nested-part ReID stack."""
     parser = argparse.ArgumentParser()
     parser.add_argument("--assets-root", type=Path, required=True)
-    parser.add_argument("--multitask-sdk-root", type=Path)
-    parser.add_argument("--multitask-checkpoint-url")
+    parser.add_argument(
+        "--multitask-checkpoint-url", default=os.environ.get("VOLLYAI_MULTITASK_CHECKPOINT_URL")
+    )
     parser.add_argument("--osnet-url")
     parser.add_argument("--dino-url")
     parser.add_argument("--with-reid", action="store_true")
@@ -137,9 +133,9 @@ def main() -> None:
 
     assets_root = args.assets_root.resolve()
     assets_root.mkdir(parents=True, exist_ok=True)
-    multitask_root = prepare_multitask_sdk(
+    multitask_root, multitask_checkpoint = prepare_multitask_sdk(
+        project_root=Path(__file__).resolve().parents[1],
         assets_root=assets_root,
-        sdk_root=args.multitask_sdk_root,
         checkpoint_url=args.multitask_checkpoint_url,
     )
 
@@ -156,7 +152,7 @@ def main() -> None:
 
     result = {
         "multitask_sdk_root": str(multitask_root),
-        "multitask_checkpoint": str(multitask_root / "best.pth"),
+        "multitask_checkpoint": str(multitask_checkpoint),
         "smp_root": str(smp_root),
         "osnet_checkpoint": str(osnet_checkpoint),
     }

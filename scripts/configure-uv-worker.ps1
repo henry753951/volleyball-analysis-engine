@@ -7,7 +7,6 @@ param(
     [string]$TokenName = "uv-analysis-worker",
     [string]$InstanceId = "$env:COMPUTERNAME-uv-analysis-worker",
     [string]$AssetsRoot,
-    [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
     [ValidateSet("auto", "cpu", "cuda:0")][string]$Device = "auto",
     [switch]$WithReid,
     [switch]$Force
@@ -60,16 +59,12 @@ if ((Test-Path -LiteralPath $configPath) -and -not $Force) {
     throw "$configPath already exists. Pass -Force to replace it."
 }
 
-$sdkRoot = if ($MultitaskSdkRoot) {
-    (Resolve-Path -LiteralPath $MultitaskSdkRoot).Path
-}
-else {
-    (Resolve-Path -LiteralPath (Join-Path $assetsPath "volleyball_inference_sdk")).Path
-}
+$sdkRoot = (Resolve-Path -LiteralPath (Join-Path $projectRoot "src")).Path
 $smpRoot = (Resolve-Path -LiteralPath (Join-Path $assetsPath "selective-mask-propagation")).Path
+$checkpoint = (Resolve-Path -LiteralPath (Join-Path $assetsPath "volleyball_multitask\best.pth")).Path
 $required = @(
     (Join-Path $sdkRoot "volleyball_sdk\__init__.py"),
-    (Join-Path $sdkRoot "best.pth"),
+    $checkpoint,
     (Join-Path $smpRoot "selective_mask_propagation\deep_eiou\tracker.py"),
     (Join-Path $smpRoot "selective_mask_propagation\osnet\checkpoints\sports_model.pth.tar-60")
 )
@@ -91,7 +86,7 @@ $values = [ordered]@{
     VOLLYAI_DEVICE = $Device
     VOLLYAI_WORKSPACE = (Join-Path $projectRoot ".artifacts\workspaces")
     VOLLYAI_MULTITASK_SDK_ROOT = $sdkRoot
-    VOLLYAI_MULTITASK_CHECKPOINT = (Join-Path $sdkRoot "best.pth")
+    VOLLYAI_MULTITASK_CHECKPOINT = $checkpoint
     VOLLYAI_SMP_ROOT = $smpRoot
     VOLLYAI_OSNET_CHECKPOINT = (Join-Path $smpRoot "selective_mask_propagation\osnet\checkpoints\sports_model.pth.tar-60")
     VOLLYAI_LOCAL_TRACKER = "deep_eiou"

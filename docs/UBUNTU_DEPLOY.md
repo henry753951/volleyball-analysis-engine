@@ -1,7 +1,9 @@
 # Ubuntu deployment
 
 This is the operator-facing path for a real Ubuntu host. The installer is executable through a
-GitHub raw URL and downloads tar archives; it does not require `git clone`.
+GitHub raw URL and downloads the bootstrap archive; it does not require a host checkout. The SDK
+code is part of the engine source tree and only the private checkpoint is downloaded from a direct
+Hugging Face URL.
 
 ## 1. Host prerequisites
 
@@ -28,9 +30,9 @@ image build.
 
 ## 2. Docker install, model assets and GitHub bootstrap
 
-The command below downloads the engine archive and the public OSNet/SMP assets. During the Docker
-build, the image clones the public central repository internally; no central checkout is required
-on the host.
+The command below downloads the engine bootstrap archive, the private multitask checkpoint and the
+public OSNet/SMP assets. During the Docker build, the image clones the public central repository
+internally. No repository checkout is required on the host.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-engine/main/scripts/install-ubuntu.sh \
@@ -38,7 +40,7 @@ curl -fsSL https://raw.githubusercontent.com/henry753951/volleyball-analysis-eng
       --mode docker \
       --server-url https://volleyai.hsulab.net/ \
       --token 'vmai_replace-with-worker-token' \
-      --multitask-sdk-root /srv/vollyai/volleyball_inference_sdk \
+      --multitask-checkpoint-url 'https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true' \
       --osnet-url 'https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true' \
       --gpu-ids 0,1
 ```
@@ -48,25 +50,21 @@ URL. The default is `https://volleyai.hsulab.net/`, normalized to
 `wss://volleyai.hsulab.net/api/v2/ai/providers/ws`. The token is written only to the local `.env`
 with restrictive permissions and is passed to the outbound worker connection.
 
+The command includes the project's Hugging Face resolve URL for `best.pth`. The SDK itself is already
+in `src/volleyball_sdk/`; the
+checkpoint is the only private model URL required by the installer.
+
 The public model links used by the Docker bootstrap are direct URLs:
 
 | Asset | Direct URL | Host destination |
 | --- | --- | --- |
 | SMP source | [GitHub archive](https://codeload.github.com/holma91/selective-mask-propagation/tar.gz/refs/heads/main) | `.models/selective-mask-propagation` |
 | Sports OSNet | [Hugging Face file](https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true) | `.models/selective-mask-propagation/selective_mask_propagation/osnet/checkpoints/sports_model.pth.tar-60` |
+| Volleyball multitask SDK code | Bundled in this repository under `src/volleyball_sdk` | Docker image `/app/src/volleyball_sdk` |
+| Volleyball multitask `best.pth` | Hugging Face resolve URL supplied with `--multitask-checkpoint-url` | `.models/volleyball_multitask/best.pth` |
 
-The private multitask SDK must contain `volleyball_sdk/__init__.py`; its `best.pth` may remain in
-that directory or be downloaded directly:
-
-```bash
---multitask-sdk-root /srv/vollyai/volleyball_inference_sdk \
---multitask-checkpoint-url 'https://<your-real-artifact-host>/best.pth'
-```
-
-The URL above is intentionally a placeholder: the project does not publish the private checkpoint.
-If no checkpoint URL is supplied, put `best.pth` in the SDK directory. The SDK code is still
-required because the worker imports its schema, predictor and video sampler; the checkpoint alone
-cannot run the current worker. No model manifest or SHA argument is used.
+Operators do not need to provide an SDK path, manifest URL or SHA. The installer downloads the
+checkpoint automatically and Docker mounts the prepared model directory read-only.
 
 ## 3. Multi-GPU behavior
 
@@ -86,13 +84,13 @@ container the assigned card is addressed as `cuda:0`. CPU-only Docker uses
 
 ## 4. Docker host layout and operations
 
-The installer downloads the engine archive. The Docker build clones
+The installer downloads the engine archive and checkpoint. The Docker build clones
 `https://github.com/henry753951/volleyball-monitoring-ai.git` inside the build stage, then mounts
-model directories read-only:
+the prepared model directory read-only:
 
 ```text
-host .models/volleyball_inference_sdk       -> /models/volleyball-sdk
-host .models/selective-mask-propagation     -> /models/smp
+image src/volleyball_sdk                     -> /app/src/volleyball_sdk
+host .models                                 -> /models
 Docker named volume                          -> /workspaces
 Docker named volume                          -> /home/worker/.cache
 ```

@@ -7,7 +7,6 @@ param(
     [switch]$CreateLocalToken,
     [string]$InstancePrefix = "analysis-worker",
     [string]$AssetsRoot,
-    [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
     [string]$MultitaskCheckpointUrl = $env:VOLLYAI_MULTITASK_CHECKPOINT_URL,
     [string]$OsnetUrl = $env:VOLLYAI_OSNET_URL,
     [string]$DinoUrl = $env:VOLLYAI_DINO_URL,
@@ -108,9 +107,6 @@ function Set-DotEnvValues([hashtable]$Values) {
 
 if ($Mode -eq "docker") {
     Require-Command "docker"
-    if (-not (Test-Path -LiteralPath (Join-Path $projectRoot "..\volleyball-monitoring-ai\sdk\pyproject.toml") -PathType Leaf)) {
-        throw "Docker build requires volleyball-monitoring-ai beside volleyball-analysis-engine."
-    }
 }
 else {
     Require-Command "uv"
@@ -138,7 +134,6 @@ if (-not $SkipModelDownload) {
         AssetsRoot = $assetsPath
         TorchBackend = $TorchBackend
     }
-    if ($MultitaskSdkRoot) { $setupParameters.MultitaskSdkRoot = $MultitaskSdkRoot }
     if ($MultitaskCheckpointUrl) { $setupParameters.MultitaskCheckpointUrl = $MultitaskCheckpointUrl }
     if ($OsnetUrl) { $setupParameters.OsnetUrl = $OsnetUrl }
     if ($DinoUrl) { $setupParameters.DinoUrl = $DinoUrl }
@@ -157,7 +152,6 @@ if ($Mode -eq "uv") {
     }
     if ($CreateLocalToken) { $configureParameters.CreateLocalToken = $true }
     else { $configureParameters.Token = $token }
-    if ($MultitaskSdkRoot) { $configureParameters.MultitaskSdkRoot = $MultitaskSdkRoot }
     if ($WithReid) { $configureParameters.WithReid = $true }
     & $configureScript @configureParameters
     if (-not $NoStart) {
@@ -175,7 +169,6 @@ if ($Mode -eq "uv") {
     exit 0
 }
 
-$sdkHostRoot = if ($MultitaskSdkRoot) { [IO.Path]::GetFullPath($MultitaskSdkRoot) } else { Join-Path $assetsPath "volleyball_inference_sdk" }
 $smpHostRoot = Join-Path $assetsPath "selective-mask-propagation"
 $envValues = @{
     VOLLYAI_SERVER_WS_URL = $webSocketUrl
@@ -184,8 +177,8 @@ $envValues = @{
     VOLLYAI_DEVICE = if ($TorchBackend -eq "cpu") { "cpu" } else { "cuda:0" }
     VOLLYAI_TORCH_BACKEND = $TorchBackend
     VOLLYAI_WORKER_IMAGE = "volleyball-analysis-engine:local"
-    VOLLYAI_MULTITASK_SDK_HOST_ROOT = $sdkHostRoot.Replace("\", "/")
-    VOLLYAI_SMP_HOST_ROOT = $smpHostRoot.Replace("\", "/")
+    VOLLYAI_MULTITASK_CHECKPOINT_URL = $MultitaskCheckpointUrl
+    VOLLYAI_MODELS_HOST_ROOT = $assetsPath.Replace("\", "/")
 }
 Set-DotEnvValues $envValues
 

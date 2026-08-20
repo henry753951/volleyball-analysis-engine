@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Ubuntu Docker entrypoint. It can be piped directly from GitHub; it downloads tar archives,
-# not Git checkouts, and then runs the local copy.
+# Ubuntu Docker entrypoint. It can be piped directly from GitHub; it downloads the bootstrap
+# archive and public model assets. The SDK code is part of the image source tree.
 REPO_OWNER="henry753951"
 ENGINE_REPO="volleyball-analysis-engine"
 ENGINE_ARCHIVE="https://github.com/${REPO_OWNER}/${ENGINE_REPO}/archive/refs/heads/main.tar.gz"
@@ -17,9 +17,8 @@ CREATE_LOCAL_TOKEN=0
 INSTALL_DIR="${VOLLYAI_ENGINE_DIR:-$HOME/volleyball-analysis-engine}"
 INSTANCE_PREFIX="analysis-worker"
 ASSETS_ROOT=""
-MULTITASK_SDK_ROOT="${VOLLYAI_MULTITASK_SDK_ROOT:-}"
-MULTITASK_CHECKPOINT_URL="${VOLLYAI_MULTITASK_CHECKPOINT_URL:-}"
 OSNET_URL="${VOLLYAI_OSNET_URL:-https://huggingface.co/datasets/holma91/SAM-Deep-EIoU/resolve/main/checkpoints/osnet_sports.pth.tar?download=true}"
+MULTITASK_CHECKPOINT_URL="${VOLLYAI_MULTITASK_CHECKPOINT_URL:-https://huggingface.co/Henry753951/volleyball-analysis-multitask-v2/resolve/main/best.pth?download=true}"
 TORCH_BACKEND="auto"
 GPU_IDS=()
 SKIP_MODEL_DOWNLOAD=0
@@ -36,8 +35,7 @@ Usage: install-ubuntu.sh [options]
   --central-http-url URL           Token API base URL for --create-local-token
   --token TOKEN                    Worker access token
   --create-local-token             Create a development token through the token API
-  --multitask-sdk-root PATH        Existing private SDK directory
-  --multitask-checkpoint-url URL   Direct URL for private best.pth
+  --multitask-checkpoint-url URL   Hugging Face resolve URL for best.pth
   --osnet-url URL                  Sports OSNet checkpoint URL
   --gpu-ids 0,1                    Explicit physical GPU IDs
   --gpu-id 2                       Add one physical GPU ID
@@ -55,11 +53,10 @@ while (($#)); do
     --central-http-url) CENTRAL_HTTP_URL="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
     --create-local-token) CREATE_LOCAL_TOKEN=1; shift ;;
+    --multitask-checkpoint-url) MULTITASK_CHECKPOINT_URL="$2"; shift 2 ;;
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
     --instance-prefix) INSTANCE_PREFIX="$2"; shift 2 ;;
     --assets-root) ASSETS_ROOT="$2"; shift 2 ;;
-    --multitask-sdk-root) MULTITASK_SDK_ROOT="$2"; shift 2 ;;
-    --multitask-checkpoint-url) MULTITASK_CHECKPOINT_URL="$2"; shift 2 ;;
     --osnet-url) OSNET_URL="$2"; shift 2 ;;
     --torch-backend) TORCH_BACKEND="$2"; shift 2 ;;
     --gpu-ids) IFS=',' read -r -a GPU_IDS <<<"$2"; shift 2 ;;
@@ -140,8 +137,11 @@ fi
 [[ "$TOKEN" =~ ^[^[:space:]]{16,}$ ]] || die 'worker token must be one line with at least 16 characters'
 
 if ((SKIP_MODEL_DOWNLOAD == 0)); then
+  CHECKPOINT_PATH="$ASSETS_ROOT/volleyball_multitask/best.pth"
+  if [[ -z "$MULTITASK_CHECKPOINT_URL" && ! -f "$CHECKPOINT_PATH" ]]; then
+    die '--multitask-checkpoint-url is required unless .models/volleyball_multitask/best.pth already exists'
+  fi
   DOWNLOAD_ARGS=(scripts/download_worker_models.py --assets-root "$ASSETS_ROOT" --osnet-url "$OSNET_URL")
-  [[ -n "$MULTITASK_SDK_ROOT" ]] && DOWNLOAD_ARGS+=(--multitask-sdk-root "$MULTITASK_SDK_ROOT")
   [[ -n "$MULTITASK_CHECKPOINT_URL" ]] && DOWNLOAD_ARGS+=(--multitask-checkpoint-url "$MULTITASK_CHECKPOINT_URL")
   python3 "${DOWNLOAD_ARGS[@]}"
 fi
@@ -155,15 +155,14 @@ set_env() {
   escaped="$(printf '%s' "$value" | sed 's/[&|]/\\&/g')"
   if grep -q "^${key}=" "$ENV_FILE"; then sed -i -E "s|^${key}=.*|${key}=${escaped}|" "$ENV_FILE"; else printf '%s=%s\n' "$key" "$value" >>"$ENV_FILE"; fi
 }
-SDK_HOST_ROOT="${MULTITASK_SDK_ROOT:-$ASSETS_ROOT/volleyball_inference_sdk}"
 set_env VOLLYAI_SERVER_WS_URL "$WS_URL"
 set_env VOLLYAI_TOKEN "$TOKEN"
 set_env VOLLYAI_INSTANCE_ID "$INSTANCE_PREFIX-docker"
 set_env VOLLYAI_DEVICE "$([[ "$TORCH_BACKEND" == cpu ]] && echo cpu || echo cuda:0)"
 set_env VOLLYAI_TORCH_BACKEND "$TORCH_BACKEND"
 set_env VOLLYAI_WORKER_IMAGE volleyball-analysis-engine:local
-set_env VOLLYAI_MULTITASK_SDK_HOST_ROOT "$SDK_HOST_ROOT"
-set_env VOLLYAI_SMP_HOST_ROOT "$ASSETS_ROOT/selective-mask-propagation"
+set_env VOLLYAI_MULTITASK_CHECKPOINT_URL "$MULTITASK_CHECKPOINT_URL"
+set_env VOLLYAI_MODELS_HOST_ROOT "$ASSETS_ROOT"
 COMPOSE_BASE=(--env-file "$ENV_FILE" -f "$PROJECT_ROOT/compose.yaml")
 require_command docker
 docker compose "${COMPOSE_BASE[@]}" build analysis-worker

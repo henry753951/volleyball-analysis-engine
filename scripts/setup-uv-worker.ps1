@@ -1,7 +1,6 @@
 [CmdletBinding()]
 param(
     [string]$AssetsRoot,
-    [string]$MultitaskSdkRoot = $env:VOLLYAI_MULTITASK_SDK_ROOT,
     [string]$MultitaskCheckpointUrl = $env:VOLLYAI_MULTITASK_CHECKPOINT_URL,
     [string]$OsnetUrl = $env:VOLLYAI_OSNET_URL,
     [string]$DinoUrl = $env:VOLLYAI_DINO_URL,
@@ -41,12 +40,6 @@ try {
         "run", "--no-sync", "python", "scripts/download_worker_models.py",
         "--assets-root", $assetsPath
     )
-    if ($MultitaskSdkRoot -and -not (Test-Path -LiteralPath $MultitaskSdkRoot -PathType Container)) {
-        throw "Multitask SDK directory is missing: $MultitaskSdkRoot"
-    }
-    if ($MultitaskSdkRoot) {
-        $downloadArguments += @("--multitask-sdk-root", $MultitaskSdkRoot)
-    }
     if ($MultitaskCheckpointUrl) {
         $downloadArguments += @("--multitask-checkpoint-url", $MultitaskCheckpointUrl)
     }
